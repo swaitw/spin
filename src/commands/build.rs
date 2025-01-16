@@ -3,7 +3,10 @@ use std::{ffi::OsString, path::PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use crate::opts::{APP_MANIFEST_FILE_OPT, BUILD_UP_OPT, DEFAULT_MANIFEST_FILE};
+use crate::{
+    directory_rels::notify_if_nondefault_rel,
+    opts::{APP_MANIFEST_FILE_OPT, BUILD_UP_OPT},
+};
 
 use super::up::UpCommand;
 
@@ -11,14 +14,20 @@ use super::up::UpCommand;
 #[derive(Parser, Debug)]
 #[clap(about = "Build the Spin application", allow_hyphen_values = true)]
 pub struct BuildCommand {
-    /// Path to application manifest. The default is "spin.toml".
+    /// The application to build. This may be a manifest (spin.toml) file, or a
+    /// directory containing a spin.toml file.
+    /// If omitted, it defaults to "spin.toml".
     #[clap(
         name = APP_MANIFEST_FILE_OPT,
         short = 'f',
         long = "from",
         alias = "file",
     )]
-    pub app: Option<PathBuf>,
+    pub app_source: Option<PathBuf>,
+
+    /// Component ID to build. This can be specified multiple times. The default is all components.
+    #[clap(short = 'c', long, multiple = true)]
+    pub component_id: Vec<String>,
 
     /// Run the application after building.
     #[clap(name = BUILD_UP_OPT, short = 'u', long = "up")]
@@ -30,11 +39,11 @@ pub struct BuildCommand {
 
 impl BuildCommand {
     pub async fn run(self) -> Result<()> {
-        let manifest_file = self
-            .app
-            .as_deref()
-            .unwrap_or_else(|| DEFAULT_MANIFEST_FILE.as_ref());
-        spin_build::build(manifest_file).await?;
+        let (manifest_file, distance) =
+            spin_common::paths::find_manifest_file_path(self.app_source.as_ref())?;
+        notify_if_nondefault_rel(&manifest_file, distance);
+
+        spin_build::build(&manifest_file, &self.component_id).await?;
 
         if self.up {
             let mut cmd = UpCommand::parse_from(
@@ -44,7 +53,7 @@ impl BuildCommand {
                 )))
                 .chain(self.up_args),
             );
-            cmd.file_source = Some(manifest_file.into());
+            cmd.file_source = Some(manifest_file);
             cmd.run().await
         } else {
             Ok(())

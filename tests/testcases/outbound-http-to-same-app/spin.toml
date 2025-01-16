@@ -1,0 +1,25 @@
+spin_version = "1"
+authors = ["Fermyon Engineering <engineering@fermyon.com>"]
+description = "An application that demonstates a component making an outbound http request to another component in the same application."
+name = "local-outbound-http"
+trigger = { type = "http" }
+version = "1.0.0"
+
+[[component]]
+id = "hello"
+source = "%{source=hello-world}"
+[component.trigger]
+route = "/hello/..."
+
+[[component]]
+id = "outbound-http-allowed"
+source = "%{source=outbound-http}"
+allowed_http_hosts = ["self"]
+[component.trigger]
+route = "/outbound-allowed/..."
+
+[[component]]
+id = "outbound-http-not-allowed"
+source = "%{source=outbound-http}"
+[component.trigger]
+route = "/outbound-not-allowed/..."

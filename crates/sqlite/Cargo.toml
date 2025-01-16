@@ -1,0 +1,13 @@
+[package]
+name = "spin-sqlite"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+serde = { workspace = true }
+spin-factor-sqlite = { path = "../factor-sqlite" }
+spin-factors = { path = "../factors" }
+spin-sqlite-inproc = { path = "../sqlite-inproc" }
+spin-sqlite-libsql = { path = "../sqlite-libsql" }
+toml = { workspace = true }

@@ -1,15 +1,18 @@
 wit_bindgen::generate!({
     world: "spin-timer",
-    path: "../spin-timer.wit"
+    path: "..",
+    exports: {
+        world: MySpinTimer
+    }
 });
+
+use fermyon::spin::variables;
 
 struct MySpinTimer;
 
-impl SpinTimer for MySpinTimer {
+impl Guest for MySpinTimer {
     fn handle_timer_request() {
-        let text = spin_sdk::config::get("message").unwrap();
+        let text = variables::get("message").unwrap();
         println!("{text}");
     }
 }
-
-export_spin_timer!(MySpinTimer);

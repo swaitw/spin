@@ -1,3 +1,4 @@
+pub mod badger;
 pub mod error;
 mod git;
 pub mod lookup;
@@ -7,15 +8,21 @@ mod store;
 pub use store::PluginStore;
 
 /// List of Spin internal subcommands
-pub(crate) const SPIN_INTERNAL_COMMANDS: [&str; 10] = [
+pub(crate) const SPIN_INTERNAL_COMMANDS: &[&str] = &[
+    "template",
     "templates",
     "up",
     "new",
     "add",
-    "bindle",
+    "login",
     "deploy",
     "build",
     "plugin",
+    "plugins",
     "trigger",
     "external",
+    "doctor",
+    "registry",
+    "watch",
+    "oci",
 ];

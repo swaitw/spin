@@ -11,7 +11,8 @@ use walkdir::WalkDir;
 use crate::{
     cancellable::Cancellable,
     interaction::{InteractionStrategy, Interactive, Silent},
-    template::TemplateVariantInfo,
+    renderer::MergeTarget,
+    template::{ExtraOutputAction, TemplateVariantInfo},
 };
 use crate::{
     renderer::{RenderOperation, TemplateContent, TemplateRenderer},
@@ -37,6 +38,11 @@ pub struct RunOptions {
     pub values: HashMap<String, String>,
     /// If true accept default values where available
     pub accept_defaults: bool,
+    /// If true, do not create a .gitignore file
+    pub no_vcs: bool,
+    /// Skip the overwrite prompt if the output directory already contains files
+    /// (or, if silent, allow overwrite instead of erroring).
+    pub allow_overwrite: bool,
 }
 
 impl Run {
@@ -84,16 +90,19 @@ impl Run {
         &self,
         interaction: impl InteractionStrategy,
     ) -> anyhow::Result<Option<TemplateRenderer>> {
-        self.validate_trigger().await?;
+        self.validate_version()?;
+        self.validate_trigger()?;
 
         // TODO: rationalise `path` and `dir`
         let to = self.generation_target_dir();
 
-        match interaction.allow_generate_into(&to) {
-            Cancellable::Cancelled => return Ok(None),
-            Cancellable::Ok(_) => (),
-            Cancellable::Err(e) => return Err(e),
-        };
+        if !self.options.allow_overwrite {
+            match interaction.allow_generate_into(&to) {
+                Cancellable::Cancelled => return Ok(None),
+                Cancellable::Ok(_) => (),
+                Cancellable::Err(e) => return Err(e),
+            };
+        }
 
         self.validate_provided_values()?;
 
@@ -114,7 +123,14 @@ impl Run {
             .map(|(id, path)| self.snippet_operation(id, path))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let render_operations = files.into_iter().chain(snippets).collect();
+        let extras = self
+            .template
+            .extra_outputs()
+            .iter()
+            .map(|extra| self.extra_operation(extra))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let render_operations = files.into_iter().chain(snippets).chain(extras).collect();
 
         match interaction.populate_parameters(self) {
             Cancellable::Ok(parameter_values) => {
@@ -136,7 +152,15 @@ impl Run {
     }
 
     fn included_files(&self, from: &Path, to: &Path) -> anyhow::Result<Vec<RenderOperation>> {
-        let all_content_files = Self::list_content_files(from)?;
+        let gitignore = ".gitignore";
+        let mut all_content_files = Self::list_content_files(from)?;
+        // If user asked for no_vcs
+        if self.options.no_vcs {
+            all_content_files.retain(|file| match file.file_name() {
+                None => true,
+                Some(file_name) => file_name.to_os_string() != gitignore,
+            });
+        }
         let included_files =
             self.template
                 .included_files(from, all_content_files, &self.options.variant);
@@ -210,14 +234,28 @@ impl Run {
         }
     }
 
-    async fn validate_trigger(&self) -> anyhow::Result<()> {
+    fn validate_trigger(&self) -> anyhow::Result<()> {
+        match &self.options.variant {
+            TemplateVariantInfo::NewApplication => Ok(()),
+            TemplateVariantInfo::AddComponent { manifest_path } => {
+                match crate::app_info::AppInfo::from_file(manifest_path) {
+                    Some(Ok(app_info)) if app_info.manifest_format() == 1 => self
+                        .template
+                        .check_compatible_trigger(app_info.trigger_type()),
+                    _ => Ok(()), // Fail forgiving - don't block the user if things are under construction
+                }
+            }
+        }
+    }
+
+    fn validate_version(&self) -> anyhow::Result<()> {
         match &self.options.variant {
             TemplateVariantInfo::NewApplication => Ok(()),
             TemplateVariantInfo::AddComponent { manifest_path } => {
                 match crate::app_info::AppInfo::from_file(manifest_path) {
                     Some(Ok(app_info)) => self
                         .template
-                        .check_compatible_trigger(app_info.trigger_type()),
+                        .check_compatible_manifest_format(app_info.manifest_format()),
                     _ => Ok(()), // Fail forgiving - don't block the user if things are under construction
                 }
             }
@@ -233,7 +271,7 @@ impl Run {
         let abs_snippet_file = snippets_dir.join(snippet_file);
         let file_content = std::fs::read(abs_snippet_file)
             .with_context(|| format!("Error reading snippet file {}", snippet_file))?;
-        let content = TemplateContent::infer_from_bytes(file_content, &self.template_parser())
+        let content = TemplateContent::infer_from_bytes(file_content, &Self::template_parser())
             .with_context(|| format!("Error parsing snippet file {}", snippet_file))?;
 
         match id {
@@ -248,10 +286,54 @@ impl Run {
                         Err(anyhow::anyhow!("Spin doesn't know what to do with a 'component' snippet outside an 'add component' operation")),
                 }
             },
+            "application_trigger" => {
+                match &self.options.variant {
+                    TemplateVariantInfo::AddComponent { manifest_path } =>
+                        Ok(RenderOperation::AppendToml(
+                            manifest_path.clone(),
+                            content,
+                        )),
+                    TemplateVariantInfo::NewApplication =>
+                        Err(anyhow::anyhow!("Spin doesn't know what to do with an 'application_trigger' snippet outside an 'add component' operation")),
+                    }
+            },
+            "variables" => {
+                match &self.options.variant {
+                    TemplateVariantInfo::AddComponent { manifest_path } =>
+                        Ok(RenderOperation::MergeToml(
+                            manifest_path.clone(),
+                            MergeTarget::Application("variables"),
+                            content,
+                        )),
+                    TemplateVariantInfo::NewApplication =>
+                        Err(anyhow::anyhow!("Spin doesn't know what to do with a 'variables' snippet outside an 'add component' operation")),
+                }
+            },
             _ => Err(anyhow::anyhow!(
-                "Spin doesn't know what to do with snippet {}",
-                id
+                "Spin doesn't know what to do with snippet {id}",
             )),
+        }
+    }
+
+    fn extra_operation(&self, extra: &ExtraOutputAction) -> anyhow::Result<RenderOperation> {
+        match extra {
+            ExtraOutputAction::CreateDirectory(_, template, at) => {
+                let component_path = self.options.output_path.clone();
+                let base_path = match at {
+                    crate::reader::CreateLocation::Component => component_path,
+                    crate::reader::CreateLocation::Manifest => match &self.options.variant {
+                        TemplateVariantInfo::NewApplication => component_path,
+                        TemplateVariantInfo::AddComponent { manifest_path } => manifest_path
+                            .parent()
+                            .map(|p| p.to_owned())
+                            .unwrap_or(component_path),
+                    },
+                };
+                Ok(RenderOperation::CreateDirectory(
+                    base_path,
+                    template.clone(),
+                ))
+            }
         }
     }
 
@@ -275,16 +357,21 @@ impl Run {
 
     // TODO: async when we know where things sit
     fn read_all(&self, paths: Vec<PathBuf>) -> anyhow::Result<Vec<(PathBuf, TemplateContent)>> {
-        let template_parser = self.template_parser();
+        let template_parser = Self::template_parser();
         let contents = paths
             .iter()
-            .map(std::fs::read)
-            .map(|c| {
-                c.map_err(|e| e.into())
-                    .and_then(|cc| TemplateContent::infer_from_bytes(cc, &template_parser))
-            })
+            .map(|path| TemplateContent::infer_from_bytes(std::fs::read(path)?, &template_parser))
             .collect::<Result<Vec<_>, _>>()?;
-        let pairs = paths.into_iter().zip(contents).collect();
+        // Strip optional .tmpl extension
+        // Templates can use this if they don't want to store files with their final extensions
+        let paths = paths.into_iter().map(|p| {
+            if p.extension().is_some_and(|e| e == "tmpl") {
+                p.with_extension("")
+            } else {
+                p
+            }
+        });
+        let pairs = paths.zip(contents).collect();
         Ok(pairs)
     }
 
@@ -307,17 +394,44 @@ impl Run {
         pathdiff::diff_paths(source, src_dir).map(|rel| (dest_dir.join(rel), cont))
     }
 
-    fn template_parser(&self) -> liquid::Parser {
-        let mut builder = liquid::ParserBuilder::with_stdlib()
+    fn template_parser() -> liquid::Parser {
+        let builder = liquid::ParserBuilder::with_stdlib()
             .filter(crate::filters::KebabCaseFilterParser)
             .filter(crate::filters::PascalCaseFilterParser)
+            .filter(crate::filters::DottedPascalCaseFilterParser)
             .filter(crate::filters::SnakeCaseFilterParser)
             .filter(crate::filters::HttpWildcardFilterParser);
-        for filter in self.template.custom_filters() {
-            builder = builder.filter(filter);
-        }
         builder
             .build()
             .expect("can't fail due to no partials support")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_filters() {
+        let data = liquid::object!({
+            "snaky": "originally_snaky",
+            "kebabby": "originally-kebabby",
+            "dotted": "originally.semi-dotted"
+        });
+        let parser = Run::template_parser();
+
+        let eval = |s: &str| parser.parse(s).unwrap().render(&data).unwrap();
+
+        let kebab = eval("{{ snaky | kebab_case }}");
+        assert_eq!("originally-snaky", kebab);
+
+        let snek = eval("{{ kebabby | snake_case }}");
+        assert_eq!("originally_kebabby", snek);
+
+        let pascal = eval("{{ snaky | pascal_case }}");
+        assert_eq!("OriginallySnaky", pascal);
+
+        let dotpas = eval("{{ dotted | dotted_pascal_case }}");
+        assert_eq!("Originally.SemiDotted", dotpas);
     }
 }

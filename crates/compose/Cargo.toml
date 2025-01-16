@@ -1,0 +1,22 @@
+[package]
+name = "spin-compose"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+indexmap = "2"
+semver = "1"
+spin-app = { path = "../app" }
+spin-serde = { path = "../serde" }
+thiserror = { workspace = true }
+wac-graph = "0.6"
+
+[lints]
+workspace = true

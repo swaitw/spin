@@ -1,0 +1,11 @@
+[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wit-bindgen = { version = "0.16.0", optional = true }
+
+[features]
+default = ["define-component"]
+define-component = ["dep:wit-bindgen"]

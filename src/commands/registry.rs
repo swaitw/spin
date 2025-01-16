@@ -1,9 +1,10 @@
+use crate::{directory_rels::notify_if_nondefault_rel, opts::*};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use spin_oci::Client;
-use std::{io::Read, path::PathBuf};
-
-use crate::opts::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use spin_common::arg_parser::parse_kv;
+use spin_oci::{client::InferPredefinedAnnotations, Client};
+use std::{io::Read, path::PathBuf, time::Duration};
 
 /// Commands for working with OCI registries to distribute applications.
 #[derive(Subcommand, Debug)]
@@ -28,13 +29,16 @@ impl RegistryCommands {
 
 #[derive(Parser, Debug)]
 pub struct Push {
-    /// Path to spin.toml
+    /// The application to push. This may be a manifest (spin.toml) file, or a
+    /// directory containing a spin.toml file.
+    /// If omitted, it defaults to "spin.toml".
     #[clap(
         name = APP_MANIFEST_FILE_OPT,
         short = 'f',
-        long = "file",
+        long = "from",
+        alias = "file",
     )]
-    pub app: Option<PathBuf>,
+    pub app_source: Option<PathBuf>,
 
     /// Ignore server certificate errors
     #[clap(
@@ -45,24 +49,53 @@ pub struct Push {
     )]
     pub insecure: bool,
 
-    /// Reference of the Spin application
+    /// Specifies to perform `spin build` before pushing the application.
+    #[clap(long, takes_value = false, env = ALWAYS_BUILD_ENV)]
+    pub build: bool,
+
+    /// Reference in the registry of the Spin application.
+    /// This is a string whose format is defined by the registry standard, and generally consists of <registry>/<username>/<application-name>:<version>. E.g. ghcr.io/ogghead/spin-test-app:0.1.0
     #[clap()]
     pub reference: String,
+
+    /// Cache directory for downloaded registry data.
+    #[clap(long)]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Specifies the OCI image manifest annotations (in key=value format).
+    /// Any existing value will be overwritten. Can be used multiple times.
+    #[clap(long = "annotation", parse(try_from_str = parse_kv))]
+    pub annotations: Vec<(String, String)>,
 }
 
 impl Push {
     pub async fn run(self) -> Result<()> {
-        let app_file = self
-            .app
-            .as_deref()
-            .unwrap_or_else(|| DEFAULT_MANIFEST_FILE.as_ref());
+        let (app_file, distance) =
+            spin_common::paths::find_manifest_file_path(self.app_source.as_ref())?;
+        notify_if_nondefault_rel(&app_file, distance);
 
-        let dir = tempfile::tempdir()?;
-        let app = spin_loader::local::from_file(&app_file, Some(dir.path())).await?;
+        if self.build {
+            spin_build::build(&app_file, &[]).await?;
+        }
 
-        let mut client = spin_oci::Client::new(self.insecure, None).await?;
-        let digest = client.push(&app, &self.reference).await?;
+        let annotations = if self.annotations.is_empty() {
+            None
+        } else {
+            Some(self.annotations.iter().cloned().collect())
+        };
 
+        let mut client = spin_oci::Client::new(self.insecure, self.cache_dir.clone()).await?;
+
+        let _spinner = create_dotted_spinner(2000, "Pushing app to the Registry".to_owned());
+
+        let digest = client
+            .push(
+                &app_file,
+                &self.reference,
+                annotations,
+                InferPredefinedAnnotations::All,
+            )
+            .await?;
         match digest {
             Some(digest) => println!("Pushed with digest {digest}"),
             None => println!("Pushed; the registry did not return the digest"),
@@ -83,17 +116,25 @@ pub struct Pull {
     )]
     pub insecure: bool,
 
-    /// Reference of the Spin application
+    /// Reference in the registry of the published Spin application.
+    /// This is a string whose format is defined by the registry standard, and generally consists of <registry>/<username>/<application-name>:<version>. E.g. ghcr.io/ogghead/spin-test-app:0.1.0
     #[clap()]
     pub reference: String,
+
+    /// Cache directory for downloaded registry data.
+    #[clap(long)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl Pull {
     /// Pull a Spin application from an OCI registry
     pub async fn run(self) -> Result<()> {
-        let mut client = spin_oci::Client::new(self.insecure, None).await?;
-        client.pull(&self.reference).await?;
+        let mut client = spin_oci::Client::new(self.insecure, self.cache_dir.clone()).await?;
 
+        let _spinner = create_dotted_spinner(2000, "Pulling app from the Registry".to_owned());
+
+        client.pull(&self.reference).await?;
+        println!("Successfully pulled the app from the registry");
         Ok(())
     }
 }
@@ -116,6 +157,7 @@ pub struct Login {
     )]
     pub password_stdin: bool,
 
+    /// OCI registry server (e.g. ghcr.io)
     #[clap()]
     pub server: String,
 }
@@ -164,4 +206,16 @@ impl Login {
         );
         Ok(())
     }
+}
+
+fn create_dotted_spinner(interval: u64, message: String) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.enable_steady_tick(Duration::from_millis(interval));
+    spinner.set_style(
+        ProgressStyle::with_template("{msg}{spinner}\n")
+            .unwrap()
+            .tick_strings(&[".", "..", "...", "....", "....."]),
+    );
+    spinner.set_message(message);
+    spinner
 }

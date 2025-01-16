@@ -1,15 +1,16 @@
 use std::{
     collections::HashMap,
+    io::IsTerminal,
     path::{Path, PathBuf},
     str::FromStr,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
+use itertools::Itertools;
 use path_absolutize::Absolutize;
 use tokio;
 
-use spin_loader::local::absolutize;
 use spin_templates::{RunOptions, Template, TemplateManager, TemplateVariantInfo};
 
 use crate::opts::{APP_MANIFEST_FILE_OPT, DEFAULT_MANIFEST_FILE};
@@ -17,12 +18,19 @@ use crate::opts::{APP_MANIFEST_FILE_OPT, DEFAULT_MANIFEST_FILE};
 /// Scaffold a new application based on a template.
 #[derive(Parser, Debug)]
 pub struct TemplateNewCommandCore {
-    /// The template from which to create the new application or component. Run `spin templates list` to see available options.
-    pub template_id: Option<String>,
-
     /// The name of the new application or component.
     #[clap(value_parser = validate_name)]
     pub name: Option<String>,
+
+    /// The name of the new application or component. If present, `name` is instead
+    /// treated as the template ID. This provides backward compatibility with
+    /// Spin 1.x syntax, so that existing content continues to work.
+    #[clap(hide = true)]
+    pub name_back_compat: Option<String>,
+
+    /// The template from which to create the new application or component. Run `spin templates list` to see available options.
+    #[clap(short = 't', long = "template")]
+    pub template_id: Option<String>,
 
     /// Filter templates to select by tags.
     #[clap(
@@ -34,8 +42,12 @@ pub struct TemplateNewCommandCore {
 
     /// The directory in which to create the new application or component.
     /// The default is the name argument.
-    #[clap(short = 'o', long = "output")]
+    #[clap(short = 'o', long = "output", group = "location")]
     pub output_path: Option<PathBuf>,
+
+    /// Create the new application or component in the current directory.
+    #[clap(long = "init", takes_value = false, group = "location")]
+    pub init: bool,
 
     /// Parameter values to be passed to the template (in name=value format).
     #[clap(short = 'v', long = "value", multiple_occurrences = true)]
@@ -49,8 +61,21 @@ pub struct TemplateNewCommandCore {
 
     /// An optional argument that allows to skip prompts for the manifest file
     /// by accepting the defaults if available on the template
-    #[clap(long = "accept-defaults", takes_value = false)]
+    #[clap(short = 'a', long = "accept-defaults", takes_value = false)]
     pub accept_defaults: bool,
+
+    /// An optional argument that allows to skip creating .gitignore
+    #[clap(long = "no-vcs", takes_value = false)]
+    pub no_vcs: bool,
+
+    /// If the output directory already contains files, generate the new files into
+    /// it without confirming, overwriting any existing files with the same names.
+    #[clap(
+        long = "allow-overwrite",
+        alias = "allow-overwrites",
+        takes_value = false
+    )]
+    pub allow_overwrite: bool,
 }
 
 /// Scaffold a new application based on a template.
@@ -113,16 +138,20 @@ impl TemplateNewCommandCore {
         let template_manager = TemplateManager::try_default()
             .context("Failed to construct template directory path")?;
 
-        let template = match &self.template_id {
+        let (name, template_id) = self.resolve_name_template_syntax(&template_manager, &variant)?;
+
+        let template = match &template_id {
             Some(template_id) => match template_manager
                 .get(template_id)
                 .with_context(|| format!("Error retrieving template {}", template_id))?
             {
                 Some(template) => template,
-                None => {
-                    println!("Template {template_id} not found");
-                    return Ok(());
-                }
+                None => match prompt_template(&template_manager, &variant, &[template_id.clone()])
+                    .await?
+                {
+                    Some(template) => template,
+                    None => return Ok(()),
+                },
             },
             None => match prompt_template(&template_manager, &variant, &self.tags).await? {
                 Some(template) => template,
@@ -139,12 +168,17 @@ impl TemplateNewCommandCore {
             return Ok(());
         }
 
-        let name = match &self.name {
+        let name = match &name {
             Some(name) => name.to_owned(),
             None => prompt_name(&variant).await?,
         };
 
-        let output_path = self.output_path.clone().unwrap_or_else(|| path_safe(&name));
+        let output_path = if self.init {
+            PathBuf::from(".")
+        } else {
+            self.output_path.clone().unwrap_or_else(|| path_safe(&name))
+        };
+
         let values = {
             let mut values = match self.values_file.as_ref() {
                 Some(file) => values_from_file(file.as_path()).await?,
@@ -159,9 +193,67 @@ impl TemplateNewCommandCore {
             output_path,
             values,
             accept_defaults: self.accept_defaults,
+            no_vcs: self.no_vcs,
+            allow_overwrite: self.allow_overwrite,
         };
 
-        template.run(options).interactive().await
+        let run = template.run(options);
+
+        if std::io::stderr().is_terminal() {
+            run.interactive().await
+        } else {
+            run.silent().await
+        }
+    }
+
+    // Try to guess if the user is using v1 or v2 syntax, and fix things up so
+    // v1 syntax as used in existing content still works...!
+    fn resolve_name_template_syntax(
+        &self,
+        template_manager: &TemplateManager,
+        variant: &TemplateVariantInfo,
+    ) -> anyhow::Result<(Option<String>, Option<String>)> {
+        // If a user types `spin new http-rust` etc. then it's *probably* Spin 1.x muscle memory;
+        // try to be helpful without getting in the way.  And if a user types `spin new http-rust myapp`
+        // then it's DEFINITELY Spin 1.x muscle memory (or one of our many existing pieces of
+        // Spin 1.x content); do some sneaky magic.
+        let (name, template_id) = match (&self.name, &self.name_back_compat, &self.template_id) {
+            // If -t is provided we are DEFINITELY in Spin 2 syntax
+            (_, None, Some(_)) => (self.name.clone(), self.template_id.clone()),
+            (_, Some(_), Some(_)) => bail!("Cannot supply both positional and named template id"),
+            // If -t is NOT provided and we have two positional args then
+            // we are definitely in Spin 1 syntax
+            (Some(compat_tpl), Some(compat_name), None) => {
+                let command = match variant {
+                    TemplateVariantInfo::NewApplication => "new",
+                    TemplateVariantInfo::AddComponent { .. } => "add",
+                };
+                terminal::einfo!(
+                    "Using Spin 1 command syntax.",
+                    "The recommended syntax in Spin 2 is 'spin {command} {compat_name} -t {compat_tpl}'"
+                );
+                (self.name_back_compat.clone(), self.name.clone())
+            }
+            // If -t is NOT provided and we have one positional arg then we have
+            // to assume Spin 2 syntax. But if that arg matches a template then
+            // it could be Spin 1 muscle memory.
+            (Some(name), None, None) => {
+                if matches!(template_manager.get(name), Ok(Some(_))) {
+                    let creation_type = variant.articled_noun();
+                    terminal::einfo!(
+                        "This will create {creation_type} called {name}.",
+                        "If you meant to use the {name} template, write '-t {name}'."
+                    );
+                }
+                (self.name.clone(), self.template_id.clone())
+            }
+            // If NOTHING is provided we'll prompt for everything so :shrug:
+            (None, None, None) => (None, None),
+            // We can't have a second positional arg without having a first.
+            // That's not how numbers work
+            (None, Some(_), None) => panic!("got second positional arg without first"),
+        };
+        Ok((name, template_id))
     }
 }
 
@@ -189,11 +281,10 @@ impl FromStr for ParameterValue {
 /// This function reads a file and parses it as TOML, then
 /// returns the resulting hashmap of key-value pairs.
 async fn values_from_file(path: impl AsRef<Path>) -> Result<HashMap<String, String>> {
-    // Get the absolute path of the file we're reading.
-    let path = absolutize(path)?;
+    let path = path.as_ref();
 
     // Open the file.
-    let text = tokio::fs::read_to_string(&path)
+    let text = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read text from values file {}", path.display()))?;
 
@@ -218,6 +309,14 @@ async fn prompt_template(
         Some(t) => t,
         None => return Ok(None),
     };
+    if templates.is_empty() {
+        if tags.len() == 1 {
+            bail!("No templates matched '{}'", tags[0]);
+        } else {
+            bail!("No templates matched all tags");
+        }
+    }
+
     let opts = templates
         .iter()
         .map(|t| format!("{} ({})", t.id(), t.description_or_empty()))
@@ -267,7 +366,6 @@ async fn prompt_name(variant: &TemplateVariantInfo) -> anyhow::Result<String> {
 
 lazy_static::lazy_static! {
     static ref PATH_UNSAFE_CHARACTERS: regex::Regex = regex::Regex::new("[^-_.a-zA-Z0-9]").expect("Invalid path safety regex");
-    static ref NAME: regex::Regex = regex::Regex::new("^[a-zA-Z].*").expect("Invalid name regex");
 }
 
 fn path_safe(text: &str) -> PathBuf {
@@ -276,11 +374,25 @@ fn path_safe(text: &str) -> PathBuf {
 }
 
 fn validate_name(name: &str) -> Result<String, String> {
-    if NAME.is_match(name) {
-        Ok(name.to_owned())
-    } else {
-        Err("Name must start with a letter".to_owned())
+    let splits = name.split(|c| !char::is_alphanumeric(c));
+    let invalid_split_displays = splits
+        .filter(|s| !s.starts_with(char::is_alphabetic))
+        .map(|s| format!("'{s}'"))
+        .collect_vec();
+
+    if invalid_split_displays.is_empty() {
+        return Ok(name.to_owned());
     }
+
+    let invalid_text = invalid_split_displays.join(", ");
+    let verb = if invalid_split_displays.len() == 1 {
+        "does"
+    } else {
+        "do"
+    };
+
+    let msg = format!("Each segment of the name must start with a letter. {invalid_text} {verb} not start with a letter");
+    Err(msg)
 }
 
 #[cfg(test)]
@@ -356,11 +468,15 @@ mod tests {
     }
 
     #[test]
-    fn project_names_must_start_with_letter() {
+    fn project_name_segments_must_start_with_letter() {
         assert_eq!("hello", validate_name("hello").unwrap());
-        assert_eq!("Proj123!.456", validate_name("Proj123!.456").unwrap());
+        assert_eq!("hello1", validate_name("hello1").unwrap());
+        assert_eq!("hello1-again1", validate_name("hello1-again1").unwrap());
+        validate_name("Proj123!.456").unwrap_err();
         validate_name("123").unwrap_err();
         validate_name("1hello").unwrap_err();
         validate_name("_foo").unwrap_err();
+        validate_name("hello-123").unwrap_err();
+        validate_name("hello_123_456").unwrap_err();
     }
 }

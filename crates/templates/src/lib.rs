@@ -5,7 +5,6 @@
 mod app_info;
 mod cancellable;
 mod constraints;
-mod custom_filters;
 mod directory;
 mod environment;
 mod filters;
@@ -18,9 +17,13 @@ mod run;
 mod source;
 mod store;
 mod template;
+mod toml;
 mod writer;
 
 pub use manager::*;
 pub use run::{Run, RunOptions};
 pub use source::TemplateSource;
 pub use template::{Template, TemplateVariantInfo};
+
+#[cfg(test)]
+mod test_built_ins;

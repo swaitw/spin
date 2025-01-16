@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	spinhttp "github.com/fermyon/spin/sdk/go/http"
+	spinhttp "github.com/fermyon/spin/sdk/go/v2/http"
 )
 
 func init() {
@@ -13,5 +13,3 @@ func init() {
 		fmt.Fprintln(w, "Hello Fermyon!")
 	})
 }
-
-func main() {}

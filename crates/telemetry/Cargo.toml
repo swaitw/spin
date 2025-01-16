@@ -1,0 +1,21 @@
+[package]
+name = "spin-telemetry"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+http0 = { version = "0.2.9", package = "http" }
+http1 = { version = "1.0.0", package = "http" }
+opentelemetry = { workspace = true }
+opentelemetry-appender-tracing = "0.27"
+opentelemetry-otlp = { version = "0.27", features = ["http-proto", "http", "reqwest-client"] }
+opentelemetry_sdk = { workspace = true }
+terminal = { path = "../terminal" }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "ansi", "std", "env-filter", "json", "registry"] }
+
+[features]
+tracing-log-compat = ["tracing-subscriber/tracing-log", "tracing-opentelemetry/tracing-log"]

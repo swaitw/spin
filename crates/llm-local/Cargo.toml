@@ -1,0 +1,29 @@
+[package]
+name = "spin-llm-local"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+anyhow = "1.0"
+candle = { git = "https://github.com/huggingface/candle", rev = "e3261216b157a7305c18ccdd766b6e2a41afe483", package = "candle-core" }
+candle-nn = { git = "https://github.com/huggingface/candle", rev = "e3261216b157a7305c18ccdd766b6e2a41afe483" }
+candle-transformers = { git = "https://github.com/huggingface/candle", rev = "e3261216b157a7305c18ccdd766b6e2a41afe483" }
+rand = { workspace = true }
+safetensors = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+spin-common = { path = "../common" }
+spin-core = { path = "../core" }
+spin-world = { path = "../world" }
+tokenizers = "0.20"
+tokio = { workspace = true, features = ["macros", "sync", "fs"] }
+tracing = { workspace = true }
+
+[features]
+default = []
+metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
+cublas = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+[lints]
+workspace = true

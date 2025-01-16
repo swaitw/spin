@@ -1,0 +1,33 @@
+[package]
+name = "spin-componentize"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+wasm-encoder = "0.217"
+wasm-metadata = "0.217"
+wasmparser = "0.217"
+wit-component = "0.217"
+wit-parser = "0.217"
+
+[dev-dependencies]
+async-trait = { workspace = true }
+cap-std = "3"
+rand = { workspace = true }
+rand_chacha = "0.3"
+rand_core = "0.6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "fs"] }
+toml = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+wat = "1"

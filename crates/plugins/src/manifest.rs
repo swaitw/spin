@@ -1,12 +1,15 @@
+use std::io::IsTerminal;
+
 use anyhow::{anyhow, Context, Result};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::PluginStore;
 
 /// Expected schema of a plugin manifest. Should match the latest Spin plugin
 /// manifest JSON schema:
-/// https://github.com/fermyon/spin-plugins/tree/main/json-schema
+/// <https://github.com/fermyon/spin-plugins/tree/main/json-schema>
 #[derive(Serialize, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -38,6 +41,19 @@ impl PluginManifest {
     pub fn license(&self) -> &str {
         self.license.as_ref()
     }
+
+    pub fn spin_compatibility(&self) -> String {
+        self.spin_compatibility.clone()
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn homepage_url(&self) -> Option<Url> {
+        Url::parse(self.homepage.as_deref()?).ok()
+    }
+
     pub fn has_compatible_package(&self) -> bool {
         self.packages.iter().any(|p| p.matches_current_os_arch())
     }
@@ -46,9 +62,23 @@ impl PluginManifest {
     }
     pub fn is_installed_in(&self, store: &PluginStore) -> bool {
         match store.read_plugin_manifest(&self.name) {
-            Ok(m) => m.version == self.version,
+            Ok(m) => m.eq(self),
             Err(_) => false,
         }
+    }
+
+    pub fn try_version(&self) -> Result<semver::Version, semver::Error> {
+        semver::Version::parse(&self.version)
+    }
+
+    // Compares the versions. Returns None if either's version string is invalid semver.
+    pub fn compare_versions(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if let Ok(this_version) = self.try_version() {
+            if let Ok(other_version) = other.try_version() {
+                return Some(this_version.cmp_precedence(&other_version));
+            }
+        }
+        None
     }
 }
 
@@ -142,7 +172,7 @@ fn is_version_fully_compatible(supported_on: &str, spin_version: &str) -> Result
 /// for Spin pre-releases, so that you don't get *every* plugin showing as incompatible when
 /// you run a pre-release.  This is intended for listing; when executing, we use the interactive
 /// `warn_unsupported_version`, which provides the full nuanced feedback.
-fn is_version_compatible_enough(supported_on: &str, spin_version: &str) -> Result<bool> {
+pub(crate) fn is_version_compatible_enough(supported_on: &str, spin_version: &str) -> Result<bool> {
     if is_version_fully_compatible(supported_on, spin_version)? {
         Ok(true)
     } else {
@@ -161,11 +191,16 @@ fn inner_warn_unsupported_version(
     override_compatibility_check: bool,
 ) -> Result<()> {
     if !is_version_fully_compatible(supported_on, spin_version)? {
+        let show_warnings = !suppress_compatibility_warnings();
         let version = Version::parse(spin_version)?;
         if !version.pre.is_empty() {
-            eprintln!("You're using a pre-release version of Spin ({spin_version}). This plugin might not be compatible (supported: {supported_on}). Continuing anyway.");
+            if std::io::stderr().is_terminal() && show_warnings {
+                terminal::warn!("You're using a pre-release version of Spin ({spin_version}). This plugin might not be compatible (supported: {supported_on}). Continuing anyway.");
+            }
         } else if override_compatibility_check {
-            eprintln!("Plugin is not compatible with this version of Spin (supported: {supported_on}, actual: {spin_version}). Check overridden ... continuing to install or execute plugin.");
+            if show_warnings {
+                terminal::warn!("Plugin is not compatible with this version of Spin (supported: {supported_on}, actual: {spin_version}). Check overridden ... continuing to install or execute plugin.");
+            }
         } else {
             return Err(anyhow!(
             "Plugin is not compatible with this version of Spin (supported: {supported_on}, actual: {spin_version}). Try running `spin plugins update && spin plugins upgrade --all` to install latest or override with `--override-compatibility-check`."
@@ -173,6 +208,13 @@ fn inner_warn_unsupported_version(
         }
     }
     Ok(())
+}
+
+fn suppress_compatibility_warnings() -> bool {
+    match std::env::var("SPIN_PLUGINS_SUPPRESS_COMPATIBILITY_WARNINGS") {
+        Ok(s) => !s.is_empty(),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

@@ -22,7 +22,8 @@ pub(crate) struct RawTemplateManifestV1 {
     pub new_application: Option<RawTemplateVariant>,
     pub add_component: Option<RawTemplateVariant>,
     pub parameters: Option<IndexMap<String, RawParameter>>,
-    pub custom_filters: Option<Vec<RawCustomFilter>>,
+    pub custom_filters: Option<serde::de::IgnoredAny>, // kept for error messaging
+    pub outputs: Option<IndexMap<String, RawExtraOutput>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +33,48 @@ pub(crate) struct RawTemplateVariant {
     pub skip_files: Option<Vec<String>>,
     pub skip_parameters: Option<Vec<String>>,
     pub snippets: Option<HashMap<String, String>>,
+    pub conditions: Option<HashMap<String, RawConditional>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) struct RawConditional {
+    pub condition: RawCondition,
+    pub skip_files: Option<Vec<String>>,
+    pub skip_parameters: Option<Vec<String>>,
+    pub skip_snippets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    try_from = "toml::Value"
+)]
+pub(crate) enum RawCondition {
+    ManifestEntryExists(String),
+}
+
+impl TryFrom<toml::Value> for RawCondition {
+    type Error = anyhow::Error;
+
+    fn try_from(value: toml::Value) -> Result<Self, Self::Error> {
+        let Some(table) = value.as_table() else {
+            anyhow::bail!("Invalid condition: should be a single-entry table");
+        };
+        if table.keys().len() != 1 {
+            anyhow::bail!("Invalid condition: should be a single-entry table");
+        }
+        let Some(value) = table.get("manifest_entry_exists") else {
+            anyhow::bail!("Invalid condition: unknown condition type");
+        };
+        let Some(path) = value.as_str() else {
+            anyhow::bail!(
+                "Invalid condition: 'manifest_entry_exists' should be a dotted-path string"
+            );
+        };
+        Ok(Self::ManifestEntryExists(path.to_owned()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,10 +89,24 @@ pub(crate) struct RawParameter {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "action")]
+pub(crate) enum RawExtraOutput {
+    CreateDir(RawCreateDir),
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub(crate) struct RawCustomFilter {
-    pub name: String,
-    pub wasm: String,
+pub(crate) struct RawCreateDir {
+    pub path: String,
+    pub at: Option<CreateLocation>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) enum CreateLocation {
+    #[default]
+    Component,
+    Manifest,
 }
 
 pub(crate) fn parse_manifest_toml(text: impl AsRef<str>) -> anyhow::Result<RawTemplateManifest> {
@@ -61,6 +118,7 @@ pub(crate) fn parse_manifest_toml(text: impl AsRef<str>) -> anyhow::Result<RawTe
 pub(crate) enum RawInstalledFrom {
     Git { git: String },
     File { dir: String },
+    RemoteTar { url: String },
 }
 
 pub(crate) fn parse_installed_from(text: impl AsRef<str>) -> Option<RawInstalledFrom> {

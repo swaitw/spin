@@ -1,0 +1,18 @@
+[package]
+name = "spin-factor-variables"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+spin-expressions = { path = "../expressions" }
+spin-factors = { path = "../factors" }
+spin-world = { path = "../world" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+spin-factors-test = { path = "../factors-test" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

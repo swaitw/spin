@@ -3,8 +3,15 @@ on:
   push:
     branches:
       - main
+      - "v[0-9]+.[0-9]+"
     tags:
       - "v*"
+
+# Serialize workflow runs
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  RUST_VERSION: 1.81
 
 jobs:
   build-and-sign:
@@ -29,7 +36,7 @@ jobs:
               targetDir: "target/release",
             }
           - {
-              os: "ubuntu-latest",
+              os: "ubuntu-20.04",
               arch: "aarch64",
               extension: "",
               extraArgs: "--features openssl/vendored --target aarch64-unknown-linux-gnu",
@@ -37,7 +44,7 @@ jobs:
               targetDir: "target/aarch64-unknown-linux-gnu/release",
             }
           - {
-              os: "macos-latest",
+              os: "macos-13",
               arch: "amd64",
               extension: "",
               extraArgs: "",
@@ -45,12 +52,12 @@ jobs:
               targetDir: "target/release",
             }
           - {
-              os: "macos-latest",
+              os: "macos-14",
               arch: "aarch64",
               extension: "",
-              extraArgs: "--target aarch64-apple-darwin",
-              target: "aarch64-apple-darwin",
-              targetDir: "target/aarch64-apple-darwin/release/",
+              extraArgs: "",
+              target: "",
+              targetDir: "target/release/",
             }
           - {
               os: "windows-latest",
@@ -80,19 +87,23 @@ jobs:
           echo "RUNNER_OS=$OS" >> $GITHUB_ENV
 
       - name: Install Cosign for signing Spin binary
-        uses: sigstore/cosign-installer@v3.0.1
+        uses: sigstore/cosign-installer@v3.4.0
         with:
-          cosign-release: v2.0.0
+          cosign-release: v2.2.3
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: 1.68
-          default: true
-          target: ${{ matrix.config.target }}
+        shell: bash
+        run: |
+          rustup toolchain install ${{ env.RUST_VERSION }} --no-self-update
+          rustup default ${{ env.RUST_VERSION }}
+
+      - name: Install target
+        if: matrix.config.target != ''
+        shell: bash
+        run: rustup target add --toolchain ${{ env.RUST_VERSION }} ${{ matrix.config.target }}
 
       - name: "Install Wasm Rust target"
-        run: rustup target add wasm32-wasi --toolchain 1.68 && rustup target add wasm32-unknown-unknown --toolchain 1.68
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown --toolchain ${{ env.RUST_VERSION }}
 
       - name: setup for cross-compiled linux aarch64 build
         if: matrix.config.target == 'aarch64-unknown-linux-gnu'
@@ -101,12 +112,16 @@ jobs:
           sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           echo '[target.aarch64-unknown-linux-gnu]' >> ${HOME}/.cargo/config.toml
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ${HOME}/.cargo/config.toml
+          echo 'rustflags = ["-Ctarget-feature=+fp16"]' >> ${HOME}/.cargo/config.toml
+
+      - name: setup dependencies
+        uses: ./.github/actions/spin-ci-dependencies
+        with:
+          openssl-windows: "${{ matrix.os == 'windows-latest' }}"
 
       - name: build release
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: "--all-features --release ${{ matrix.config.extraArgs }}"
+        shell: bash
+        run: cargo build --release ${{ matrix.config.extraArgs }}
 
       - name: Sign the binary with GitHub OIDC token
         shell: bash
@@ -141,38 +156,43 @@ jobs:
 
       - name: upload binary as GitHub artifact
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: spin
+          name: spin-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}
           path: _dist/spin-${{ env.RELEASE_VERSION }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.tar.gz
-
-      - name: upload binary to Github release
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'Windows'
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: _dist/spin-${{ env.RELEASE_VERSION }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.tar.gz
-          tag: ${{ github.ref }}
 
       - name: upload binary as GitHub artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: spin
+          name: spin-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}
           path: _dist/spin-${{ env.RELEASE_VERSION }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.zip
 
-      - name: upload binary to Github release
-        if: startsWith(github.ref, 'refs/tags/v') &&  runner.os == 'Windows'
-        uses: svenstaro/upload-release-action@v2
+      - name: Configure AWS Credentials
+        if: |
+          runner.os == 'linux' &&
+          matrix.config.arch == 'amd64' &&
+          github.repository_owner == 'fermyon' &&
+          github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: _dist/spin-${{ env.RELEASE_VERSION }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.zip
-          tag: ${{ github.ref }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.SPIN_RELEASE_ARTIFACTS_REPO }}
+          role-session-name: spin-release-artifacts
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Copy Binary to S3 - ${{ env.RELEASE_VERSION }}
+        if: |
+          runner.os == 'linux' &&
+          matrix.config.arch == 'amd64' &&
+          github.repository_owner == 'fermyon' &&
+          github.ref == 'refs/heads/main'
+        run: |
+          aws s3 cp _dist/spin-${{ env.RELEASE_VERSION }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.tar.gz s3://${{ secrets.SPIN_RELEASE_ARTIFACTS_REPO }}/spin-${{ env.RELEASE_VERSION }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.tar.gz --acl public-read
 
   checksums:
     name: generate release checksums
     runs-on: ubuntu-latest
-    needs: build-and-sign
+    needs: [build-and-sign, build-spin-static]
     steps:
       - name: set the release version (tag)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -185,127 +205,73 @@ jobs:
         run: echo "RELEASE_VERSION=canary" >> $GITHUB_ENV
 
       - name: download release assets
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: spin
+          pattern: spin-*
+          merge-multiple: true
 
       - name: generate checksums
         run: sha256sum * > checksums-${{ env.RELEASE_VERSION }}.txt
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
-          name: spin
+          name: spin-checksums
           path: checksums-${{ env.RELEASE_VERSION }}.txt
 
-      - name: upload checksums to Github release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: checksums-${{ env.RELEASE_VERSION }}.txt
-          tag: ${{ github.ref }}
-
-
-  update-canary:
-    name: update canary release
+  create-gh-release:
+    name: create GitHub release
     runs-on: ubuntu-latest
     needs: checksums
-    if: github.ref == 'refs/heads/main'
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Download release assets
-        uses: actions/download-artifact@v3
-        with:
-          name: spin
+      - uses: actions/checkout@v3
 
-      - name: Delete canary tag
-        uses: dev-drprasad/delete-tag-and-release@v0.2.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: download release assets
+        uses: actions/download-artifact@v4
         with:
-          tag_name: canary
+          pattern: spin-*
+          path: _dist
+          merge-multiple: true
 
-      - name: Recreate canary tag and release
-        uses: ncipollo/release-action@v1.10.0
-        with:
-          tag: canary
-          allowUpdates: true
-          prerelease: true
-          artifacts: "checksums-canary.txt,spin-canary*"
-          body: |
+      - name: check if pre-release
+        shell: bash
+        run: |
+          if [[ ! "${{ github.ref_name }}" =~ ^v[0-9]+.[0-9]+.[0-9]+$ ]]
+          then
+            echo "PRERELEASE=--prerelease" >> "$GITHUB_ENV"
+          fi
+
+      - name: create GitHub release (canary)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release delete canary --cleanup-tag
+          gh release create canary _dist/* \
+            --title canary \
+            --prerelease \
+            --notes-file - <<- EOF
             This is a "canary" release of the most recent commits on our main branch. Canary is **not stable**.
             It is only intended for developers wishing to try out the latest features in Spin, some of which may not be fully implemented.
+          EOF
 
-  create-go-sdk-tag:
-    name: create tag sdk/go/v*
-    runs-on: ubuntu-latest
-    needs: build-and-sign
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set the tag to sdk/go/v*
-        shell: bash
-        run: echo "GO_SDK_TAG=sdk/go/${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
-
-      - name: Tag sdk/go/v* and push it
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          git tag ${{ env.GO_SDK_TAG }}
-          git push origin ${{ env.GO_SDK_TAG }}
+          gh release create ${{ github.ref_name }} _dist/* \
+            --title ${{ github.ref_name }} \
+            --generate-notes ${{ env.PRERELEASE }}
 
-  create-template-sdk-update-pr:
-    name: Create PR with template SDK updates
-    runs-on: ubuntu-latest
-    needs: create-go-sdk-tag
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set the spin tag
-        shell: bash
-        run: echo "SPIN_TAG=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
-
-      - name: Change sdk version
-        shell: bash
-        run: |
-          cd templates
-          SDK_VERSION=${{ env.SPIN_TAG }} make
-
-      - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v5
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PASSPHRASE }}
-          git_user_signingkey: true
-          git_commit_gpgsign: true
-
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v4
-        with:
-          commit-message: "feat(templates): update sdk to ${{ env.SPIN_TAG }}"
-          title: "feat(templates): update sdk to ${{ env.SPIN_TAG }}"
-          body: Update the SDK version used by the templates
-          branch: update-sdk-${{ env.SPIN_TAG }}
-          base: main
-          delete-branch: true
-          committer: fermybot <103076628+fermybot@users.noreply.github.com>
-          author: fermybot <103076628+fermybot@users.noreply.github.com>
-          signoff: true
-
-  # This will run when the PR above is approved and merged into main via a merge commit
   push-templates-tag:
     runs-on: ubuntu-latest
     needs: build-and-sign
-    if: github.event.commits[0].author.name == 'fermybot' && contains(github.event.commits[0].message, 'update sdk')
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v3
 
       - name: Set the tag to spin/templates/v*
         shell: bash
         run: |
-          spin_tag=$(echo "${{ github.event.commits[0].message }}" | grep -Eo v[0-9.]+)
+          spin_tag=$(echo "${{ github.ref }}" | grep -Eo "v[0-9.]+")
           IFS=. read -r major minor patch <<< "${spin_tag}"
           echo "TEMPLATE_TAG=spin/templates/$major.$minor" >> $GITHUB_ENV
 
@@ -316,3 +282,184 @@ jobs:
         run: |
           git tag ${{ env.TEMPLATE_TAG }} -f
           git push origin ${{ env.TEMPLATE_TAG }} -f
+
+  ## statically linked spin binaries
+  build-spin-static:
+    name: Build Spin static
+    runs-on: ubuntu-20.04
+    permissions:
+      # cosign uses the GitHub OIDC token
+      id-token: write
+      # needed to upload artifacts to a GH release
+      contents: write
+    strategy:
+      matrix:
+        config:
+          - {
+              arch: "aarch64",
+              target: "aarch64-unknown-linux-musl"
+            }
+          - {
+              arch: "amd64",
+              target: "x86_64-unknown-linux-musl"
+            }
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: set the release version (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: echo "RELEASE_VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+
+      - name: set the release version (main)
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: echo "RELEASE_VERSION=canary" >> $GITHUB_ENV
+
+      - name: lowercase the runner OS name
+        shell: bash
+        run: |
+          OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          echo "RUNNER_OS=$OS" >> $GITHUB_ENV
+      - name: Check if pre-release
+        id: release-version
+        shell: bash
+        run: |
+          [[ "${{ env.RELEASE_VERSION }}" =~ ^v[0-9]+.[0-9]+.[0-9]+$ ]] && \
+            echo "prerelease=false" >> "$GITHUB_OUTPUT" || \
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+      - name: setup dependencies
+        uses: ./.github/actions/spin-ci-dependencies
+        with:
+          rust: true
+          rust-cross: true
+          rust-cache: true
+
+      - name: Cargo Build
+        run: cross build --target ${{ matrix.config.target }} --release --features openssl/vendored
+        env:
+          CARGO_INCREMENTAL: 0
+          BUILD_SPIN_EXAMPLES: 0
+
+      - name: Install Cosign for signing Spin binary
+        uses: sigstore/cosign-installer@v3.4.0
+        with:
+          cosign-release: v2.2.3
+
+      - name: Sign the binary with GitHub OIDC token
+        shell: bash
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-certificate crt.pem \
+            --output-signature spin.sig \
+            target/${{ matrix.config.target }}/release/spin
+      - name: package release assets
+        shell: bash
+        run: |
+          mkdir _dist
+          cp crt.pem spin.sig README.md LICENSE target/${{ matrix.config.target }}/release/spin _dist/
+          cd _dist
+          tar czf \
+            spin-${{ env.RELEASE_VERSION }}-static-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.tar.gz \
+            crt.pem spin.sig README.md LICENSE spin
+      - name: upload binary as GitHub artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spin-static-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}
+          path: _dist/spin-${{ env.RELEASE_VERSION }}-static-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}.tar.gz
+
+  dispatch-homebrew-tap:
+    name: Dispatch spin-release event to fermyon/homebrew-tap
+    needs: create-gh-release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'fermyon' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEST_REPO_ACCESS_TOKEN }}
+          repository: fermyon/homebrew-tap
+          event-type: spin-release
+          client-payload: '{"version": "${{ github.ref_name }}"}'
+
+  docker:
+    runs-on: "ubuntu-20.04"
+    needs: [build-and-sign, build-spin-static]
+    # Only build/push Docker images if this is a v* tag or if this is main/canary
+    # i.e. skip for v* release branches
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+    strategy:
+      matrix:
+        config:
+          - { dockerfile: "Dockerfile", tag-suffix: "" }
+          - { dockerfile: "distroless.Dockerfile", tag-suffix: "-distroless" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup version info
+        id: version
+        run: |
+          if [[ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]]; then
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=canary" >> $GITHUB_OUTPUT
+          fi
+
+      - name: download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: spin-*
+          merge-multiple: true
+
+      - name: extract binaries
+        shell: bash
+        run: |
+          if [[ "${{ matrix.config.tag-suffix }}" == "-distroless" ]]; then
+            static="-static"
+          fi
+          tar xvf spin-${{ steps.version.outputs.version }}${static}-linux-amd64.tar.gz
+          mv spin spin${static}-linux-amd64
+          tar xvf spin-${{ steps.version.outputs.version }}${static}-linux-aarch64.tar.gz
+          # Note: here we s/aarch64/arm64 to conform to Docker's TARGETARCH standards
+          mv spin spin${static}-linux-arm64
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/${{ matrix.config.dockerfile }}
+          push: true
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}${{ matrix.config.tag-suffix }}

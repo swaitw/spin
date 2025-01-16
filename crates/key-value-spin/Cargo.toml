@@ -1,0 +1,17 @@
+[package]
+name = "spin-key-value-spin"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled", "array"] }
+serde = { workspace = true }
+spin-core = { path = "../core" }
+spin-factor-key-value = { path = "../factor-key-value" }
+spin-world = { path = "../world" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

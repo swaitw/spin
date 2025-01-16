@@ -1,0 +1,117 @@
+{
+  "spin_manifest_version": 2,
+  "application": {
+    "name": "maximal",
+    "version": "9999.9.9",
+    "description": "All the features, all the time",
+    "authors": [
+      "alice@example.com",
+      "bob@example.com"
+    ],
+    "trigger": {
+      "fake": {
+        "global_option": true
+      }
+    },
+    "tool": {
+      "lint": {
+        "lint_level": "savage"
+      }
+    }
+  },
+  "variables": {
+    "var_one": {
+      "default": "Default"
+    },
+    "var_two": {
+      "required": true,
+      "secret": true
+    }
+  },
+  "trigger": {
+    "fake": [
+      {
+        "component": "minimal-component"
+      },
+      {
+        "component": {
+          "source": "inline.wasm"
+        },
+        "option": true
+      }
+    ]
+  },
+  "component": {
+    "minimal-component": {
+      "source": "max-a.wasm"
+    },
+    "maximal-component": {
+      "source": {
+        "url": "http://example.test/max-b.wasm",
+        "digest": "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+      },
+      "description": "My fine component",
+      "environment": {
+        "VAR": "val"
+      },
+      "files": [
+        "pattern/*",
+        {
+          "source": "placement",
+          "destination": "/"
+        }
+      ],
+      "exclude_files": [
+        "**/secret"
+      ],
+      "allowed_outbound_hosts": [
+        "https://example.com:443"
+      ],
+      "key_value_stores": [
+        "default"
+      ],
+      "sqlite_databases": [
+        "default"
+      ],
+      "ai_models": [
+        "llama2-chat"
+      ],
+      "build": {
+        "command": "cargo build",
+        "workdir": "my-component",
+        "watch": [
+          "src/**/*.rs"
+        ]
+      },
+      "tool": {
+        "clean": {
+          "command": "cargo clean"
+        }
+      },
+      "dependencies_inherit_configuration": true,
+      "dependencies": {
+        "a:b/c": {
+          "version": "^1.2.3",
+          "registry": "my-registry.com",
+          "package": "a:b",
+          "export": "foo"
+        },
+        "foo:bar/baz@0.1.0": {
+          "path": "path/to/component.wasm",
+          "export": null
+        },
+        "fib:fub/fob": {
+          "path": "path/to/component.wasm",
+          "export": "my-export"
+        },
+        "fizz:buzz": ">=0.1.0",
+        "abc:xyz@0.1.0": {
+          "version": "=0.1.0",
+          "registry": null,
+          "package": null,
+          "export": null
+        }
+      }
+    }
+  }
+}

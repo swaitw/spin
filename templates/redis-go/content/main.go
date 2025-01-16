@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/fermyon/spin/sdk/go/redis"
+	"github.com/fermyon/spin/sdk/go/v2/redis"
 )
 
 func init() {
@@ -14,6 +14,3 @@ func init() {
 		return nil
 	})
 }
-
-// main functiion must be included for the compiler but is not executed.
-func main() {}

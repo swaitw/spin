@@ -8,17 +8,34 @@ on:
     tags: ["v*"]
   pull_request:
     branches: ["main", "v*"]
-    paths-ignore:
-      - "docs/**"
-      - "README.md"
-      - "tests/README.md"
+
+# Serialize workflow runs per ref
+# Cancel any outdated, in-flight runs for refs other than 'main'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.81
+
 jobs:
+  dependency-review:
+    name: Review new dependencies for known vulnerabilities
+    runs-on: "ubuntu-20.04"
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: 'Checkout Repository'
+        uses: actions/checkout@v4
+      - name: 'Dependency Review'
+        uses: actions/dependency-review-action@v4
+
   lint-rust:
     name: Lint Rust
-    runs-on: "ubuntu-latest"
+    runs-on: "ubuntu-20.04"
+    permissions:
+      ## Allow this job to potentially cancel the running workflow (on failure)
+      actions: write
     steps:
       - uses: actions/checkout@v3
 
@@ -29,19 +46,16 @@ jobs:
           rust-wasm: true
           rust-cache: true
 
-      - name: Cargo Format
-        run:
-          BUILD_SPIN_EXAMPLES=0 cargo fmt --all -- --check
+      - name: Run lints on main code
+        run: BUILD_SPIN_EXAMPLES=0 make lint
 
-      - name: Cargo Clippy
-        run:
-          BUILD_SPIN_EXAMPLES=0 cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run lints on examples
+        run: BUILD_SPIN_EXAMPLES=0 make lint-rust-examples
 
-  ## This is separated out to remove e2e-tests dependency on windows/mac builds
+  ## This is separated out to remove full integration tests dependencies on windows/mac builds
   build-rust-ubuntu:
     name: Build Spin Ubuntu
-    runs-on: ubuntu-latest
-    needs: [lint-rust]
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
 
@@ -53,23 +67,58 @@ jobs:
           rust-cache: true
 
       - name: Cargo Build
-        run: cargo build --workspace --release --all-targets --all-features --features openssl/vendored
+        run: cargo build --workspace --release --all-targets --features openssl/vendored --features all-tests
         env:
           CARGO_INCREMENTAL: 0
 
       - name: "Archive executable artifact"
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: spin-ubuntu-latest
           path: target/release/spin
 
-  build-rust:
-    name: Build Spin
-    runs-on: ${{ matrix.os }}
-    needs: [lint-rust]
+  build-spin-static:
+    name: Build Spin static
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        config:
+          - {
+              arch: "aarch64",
+              target: "aarch64-unknown-linux-musl"
+            }
+          - {
+              arch: "amd64",
+              target: "x86_64-unknown-linux-musl"
+            }
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: setup dependencies
+        uses: ./.github/actions/spin-ci-dependencies
+        with:
+          rust: true
+          rust-cross: true
+          rust-cache: true
+
+      - name: Cargo Build
+        run: cross build --target ${{ matrix.config.target }} --release --features openssl/vendored
+        env:
+          CARGO_INCREMENTAL: 0
+          BUILD_SPIN_EXAMPLES: 0
+
+      - name: "Archive executable artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: spin-static-${{ matrix.config.arch }}
+          path: target/${{ matrix.config.target }}/release/spin
+
+  build-spin:
+    name: Build Spin
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-13, macos-14]
     steps:
       - uses: actions/checkout@v3
 
@@ -79,26 +128,26 @@ jobs:
           rust: true
           rust-wasm: true
           rust-cache: true
+          openssl-windows: "${{ matrix.os == 'windows-latest' }}"
 
       - name: Cargo Build
-        run: cargo build --workspace --release --all-targets --all-features
+        run: cargo build --workspace --release --all-targets
         env:
           CARGO_INCREMENTAL: 0
 
       - name: "Archive executable artifact"
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: spin-${{ matrix.os }}
           path: target/release/spin${{ matrix.os == 'windows-latest' && '.exe' || '' }}
 
 
-  test-rust:
-    name: Test Spin SDK - Rust
-    runs-on: ${{ matrix.os }}
-    needs: [lint-rust]
+  test-spin:
+    name: Test Spin
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        runner: [ubuntu-22.04-4core-spin, macos-14]
     steps:
       - uses: actions/checkout@v3
 
@@ -108,68 +157,146 @@ jobs:
           rust: true
           rust-wasm: true
           rust-cache: true
-          bindle: true
           nomad: true
-          hippo: true
 
-      - name: Cargo Unit Tests
+      - name: Check disk space (Before)
+        run: df -h /
+
+      # Clear space on macOS runner which is prone to running out of space
+      - name: Free disk space
+        run: |
+          sudo rm -rf ~/.dotnet
+          sudo rm -rf /Library/Android
+          sudo rm -rf /Library/Developer/CoreSimulator
+          find /Applications -name "Xcode_*" -maxdepth 1 -mindepth 1 | xargs rm -rf
+        continue-on-error: true
+        if: ${{ matrix.runner == 'macos-14' }}
+
+      - name: Check disk space (After)
+        run: df -h /
+
+      - name: Run Unit Tests
         run: |
           make test-unit
-        env:
-          CARGO_INCREMENTAL: 0
 
-      - name: Fermyon Platform Integration Tests
+      - name: Run Integration Tests
         run: |
-          make test-fermyon-platform
+          make test-integration
         env:
-          RUST_LOG: spin=trace
-          CARGO_INCREMENTAL: 0
+          SPIN_CONFORMANCE_TESTS_DOCKER_OPT_OUT: true
+        # Only run integration tests on macOS as they will be run on ubuntu separately
+        if: ${{ matrix.runner == 'macos-14' }}
 
-  test-go:
-    name: Test Spin SDK - Go
-    runs-on: ubuntu-latest
-    needs: build-rust-ubuntu
+  all-integration-tests:
+    # run on a larger runner for more SSD/resource access
+    runs-on: ubuntu-22.04-4core-spin
+    if: ${{ github.repository_owner == 'fermyon' }}
     steps:
       - uses: actions/checkout@v3
 
-      - name: Retrieve saved Spin Binary
-        uses: actions/download-artifact@v3
+      # Install all the toolchain dependencies
+      - name: Install Rust wasm target
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
+      - uses: goto-bus-stop/setup-zig@v2
+      - uses: actions/setup-go@v4
         with:
-          name: spin-ubuntu-latest
-          path: target/debug/
-
-      - name: Fix Spin Binary permissions
+          go-version: '1.22'
+      - uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: '0.35.0'
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '20.x'
+      - name: Install Grain
         run: |
-          ls -lah target/
-          ls -lah target/debug
-          chmod +x target/debug/spin
+          wget https://github.com/grain-lang/grain/releases/download/grain-v0.6.6/grain-linux-x64
+          chmod +x grain-linux-x64
+          mv grain-linux-x64 grain
+          echo "$PWD" >> $GITHUB_PATH
+
+      - name: Run Full Integration Tests
+        run: make test-integration-full
+
+  # This runs the same steps as the release build except for signing
+  ensure-release-builds:
+    name: Run release build steps
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      matrix:
+        config:
+          - {
+              os: "ubuntu-20.04",
+              arch: "amd64",
+              extension: "",
+              # Ubuntu 22.04 no longer ships libssl1.1, so we statically
+              # link it here to preserve release binary compatibility.
+              extraArgs: "--features openssl/vendored",
+              target: "",
+              targetDir: "target/release",
+            }
+          - {
+              os: "ubuntu-20.04",
+              arch: "aarch64",
+              extension: "",
+              extraArgs: "--features openssl/vendored --target aarch64-unknown-linux-gnu",
+              target: "aarch64-unknown-linux-gnu",
+              targetDir: "target/aarch64-unknown-linux-gnu/release",
+            }
+          - {
+              os: "macos-13",
+              arch: "amd64",
+              extension: "",
+              extraArgs: "",
+              target: "",
+              targetDir: "target/release",
+            }
+          - {
+              os: "macos-14",
+              arch: "aarch64",
+              extension: "",
+              extraArgs: "",
+              target: "",
+              targetDir: "target/release",
+            }
+          - {
+              os: "windows-latest",
+              arch: "amd64",
+              extension: ".exe",
+              extraArgs: "",
+              target: "",
+              targetDir: "target/release",
+            }
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install ${{ env.RUST_VERSION }} --no-self-update
+          rustup default ${{ env.RUST_VERSION }}
+
+      - name: Install target
+        if: matrix.config.target != ''
+        shell: bash
+        run: rustup target add --toolchain ${{ env.RUST_VERSION }} ${{ matrix.config.target }}
+
+      - name: "Install Wasm Rust target"
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown --toolchain ${{ env.RUST_VERSION }}
+
+      - name: setup for cross-compiled linux aarch64 build
+        if: matrix.config.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt update
+          sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ${HOME}/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ${HOME}/.cargo/config.toml
+          echo 'rustflags = ["-Ctarget-feature=+fp16"]' >> ${HOME}/.cargo/config.toml
 
       - name: setup dependencies
         uses: ./.github/actions/spin-ci-dependencies
         with:
-          rust: true
-          bindle: true
-          golang: true
-          tinygo: true
-          wasmtime: true
+          openssl-windows: "${{ matrix.os == 'windows-latest' }}"
 
-      - name: "Test Go SDK"
-        run: make test-sdk-go
-
-  e2e-tests:
-    runs-on: ubuntu-22.04
-    needs: build-rust-ubuntu
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Retrieve saved Spin Binary
-        uses: actions/download-artifact@v3
-        with:
-          name: spin-ubuntu-latest
-          path: target/release/
-
-      - name: Run e2e tests
-        run: |
-          chmod +x `pwd`/target/release/spin
-          export E2E_VOLUME_MOUNT="-v `pwd`/target/release/spin:/usr/local/bin/spin"
-          make test-spin-up
+      - name: build release
+        shell: bash
+        run: cargo build --release ${{ matrix.config.extraArgs }}

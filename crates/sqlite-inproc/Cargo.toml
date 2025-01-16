@@ -1,0 +1,16 @@
+[package]
+name = "spin-sqlite-inproc"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+spin-factor-sqlite = { path = "../factor-sqlite" }
+spin-world = { path = "../world" }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

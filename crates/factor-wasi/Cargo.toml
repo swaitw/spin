@@ -1,0 +1,21 @@
+[package]
+name = "spin-factor-wasi"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+spin-common = { path = "../common" }
+spin-factors = { path = "../factors" }
+tokio = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+
+[dev-dependencies]
+spin-factors-test = { path = "../factors-test" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

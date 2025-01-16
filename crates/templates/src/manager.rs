@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{io::IsTerminal, path::Path};
 
 use anyhow::Context;
 
@@ -56,6 +56,7 @@ enum ExistsBehaviour {
     Update,
 }
 
+#[allow(clippy::large_enum_variant)] // it's not worth it
 enum InstallationResult {
     Installed(Template),
     Skipped(String, SkippedReason),
@@ -89,10 +90,11 @@ pub struct ListResults {
 }
 
 impl ListResults {
-    /// Returns true if no templates were found or skipped indicating that
-    /// templates may not be installed.
+    /// Returns true if no templates were found or skipped, and the UI should prompt to
+    /// install templates. This is specifically for interactive use and returns false
+    /// if not connected to a terminal.
     pub fn needs_install(&self) -> bool {
-        self.templates.is_empty() && self.skipped.is_empty()
+        self.templates.is_empty() && self.skipped.is_empty() && std::io::stderr().is_terminal()
     }
 }
 
@@ -107,7 +109,11 @@ impl TemplateManager {
     /// Creates a `TemplateManager` for the default install location.
     pub fn try_default() -> anyhow::Result<Self> {
         let store = TemplateStore::try_default()?;
-        Ok(Self { store })
+        Ok(Self::new(store))
+    }
+
+    pub(crate) fn new(store: TemplateStore) -> Self {
+        Self { store }
     }
 
     /// Installs templates from the specified source.
@@ -382,7 +388,7 @@ async fn copy_template_into(
 
 fn write_install_record(dest_dir: &Path, source: &TemplateSource) {
     let layout = TemplateLayout::new(dest_dir);
-    let install_record_path = layout.install_record_file();
+    let install_record_path = layout.installation_record_file();
 
     // A failure here shouldn't fail the install
     let install_record = source.to_install_record();
@@ -462,21 +468,112 @@ mod tests {
         PathBuf::from(crate_dir).join("tests")
     }
 
-    const TPLS_IN_THIS: usize = 12;
+    // A template manager in a temp dir.  This exists to ensure the lifetime
+    // of the TempDir
+    struct TempManager {
+        temp_dir: tempfile::TempDir,
+        manager: TemplateManager,
+    }
+
+    impl TempManager {
+        fn new() -> Self {
+            let temp_dir = tempdir().unwrap();
+            let store = TemplateStore::new(temp_dir.path());
+            let manager = TemplateManager { store };
+            Self { temp_dir, manager }
+        }
+
+        async fn new_with_this_repo_templates() -> Self {
+            let mgr = Self::new();
+            mgr.install_this_repo_templates().await;
+            mgr
+        }
+
+        async fn install_this_repo_templates(&self) -> InstallationResults {
+            let source = TemplateSource::File(project_root());
+            self.manager
+                .install(&source, &InstallOptions::default(), &DiscardingReporter)
+                .await
+                .unwrap()
+        }
+
+        async fn install_test_data_templates(&self) -> InstallationResults {
+            let source = TemplateSource::File(test_data_root());
+            self.manager
+                .install(&source, &InstallOptions::default(), &DiscardingReporter)
+                .await
+                .unwrap()
+        }
+
+        fn store_dir(&self) -> &Path {
+            self.temp_dir.path()
+        }
+    }
+
+    impl std::ops::Deref for TempManager {
+        type Target = TemplateManager;
+
+        fn deref(&self) -> &Self::Target {
+            &self.manager
+        }
+    }
+
+    // Constructs an options object to control how a template is run, with defaults.
+    // to save repeating the same thing over and over! By default, the options are:
+    // * Create a mew application
+    // * Dummy parameter values to satisfy the HTTP template
+    // * All other flags are false
+    // Use the `rest` callback to modify fields not given in the `name` and `output_path`
+    // arguments. For example, to create a RunOptions with `no_vcs` turned on, do:
+    // `run_options(name, path, |opts| { opts.no_vcs = true; })`
+    fn run_options(
+        name: impl AsRef<str>,
+        output_path: impl AsRef<Path>,
+        rest: impl FnOnce(&mut RunOptions),
+    ) -> RunOptions {
+        let mut options = RunOptions {
+            variant: crate::template::TemplateVariantInfo::NewApplication,
+            name: name.as_ref().to_owned(),
+            output_path: output_path.as_ref().to_owned(),
+            values: dummy_values(),
+            accept_defaults: false,
+            no_vcs: false,
+            allow_overwrite: false,
+        };
+        rest(&mut options);
+        options
+    }
+
+    fn make_values<SK: ToString, SV: ToString>(
+        values: impl IntoIterator<Item = (SK, SV)>,
+    ) -> HashMap<String, String> {
+        values
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn dummy_values() -> HashMap<String, String> {
+        make_values([
+            ("project-description", "dummy desc"),
+            ("http-path", "/dummy/dummy/dummy/..."),
+        ])
+    }
+
+    fn add_component_to(manifest_path: impl AsRef<Path>) -> crate::template::TemplateVariantInfo {
+        crate::template::TemplateVariantInfo::AddComponent {
+            manifest_path: manifest_path.as_ref().to_owned(),
+        }
+    }
+
+    const TPLS_IN_THIS: usize = 11;
 
     #[tokio::test]
     async fn can_install_into_new_directory() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
+        let manager = TempManager::new();
         assert_eq!(0, manager.list().await.unwrap().templates.len());
 
-        let install_result = manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let install_result = manager.install_this_repo_templates().await;
         assert_eq!(TPLS_IN_THIS, install_result.installed.len());
         assert_eq!(0, install_result.skipped.len());
 
@@ -486,9 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn skips_bad_templates() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
+        let manager = TempManager::new();
 
         let temp_source = tempdir().unwrap();
         let temp_source_tpls_dir = temp_source.path().join("templates");
@@ -519,15 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_list_all_templates_with_empty_tags() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let list_results = manager.list_with_tags(&[]).await.unwrap();
         assert_eq!(0, list_results.skipped.len());
@@ -536,15 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn skips_when_all_tags_do_not_match() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let tags_to_match = vec!["c".to_string(), "unused_tag".to_string()];
 
@@ -555,15 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_list_templates_with_multiple_tags() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let tags_to_match = vec!["http".to_string(), "c".to_string()];
 
@@ -574,15 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_list_templates_with_case_insensitive_tags() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let list_results = manager.list_with_tags(&["C".to_string()]).await.unwrap();
         assert_eq!(TPLS_IN_THIS - 1, list_results.skipped.len());
@@ -591,15 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_skip_templates_with_missing_tag() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let list_results = manager
             .list_with_tags(&["unused_tag".to_string()])
@@ -611,22 +666,14 @@ mod tests {
 
     #[tokio::test]
     async fn can_list_if_bad_dir_in_store() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
+        let manager = TempManager::new();
         assert_eq!(0, manager.list().await.unwrap().templates.len());
 
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
-
+        manager.install_this_repo_templates().await;
         assert_eq!(TPLS_IN_THIS, manager.list().await.unwrap().templates.len());
         assert_eq!(0, manager.list().await.unwrap().warnings.len());
 
-        fs::create_dir(temp_dir.path().join("i-trip-you-up")).unwrap();
+        fs::create_dir(manager.store_dir().join("i-trip-you-up")).unwrap();
 
         let list_results = manager.list().await.unwrap();
         assert_eq!(TPLS_IN_THIS, list_results.templates.len());
@@ -640,16 +687,9 @@ mod tests {
 
     #[tokio::test]
     async fn can_uninstall() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
         assert_eq!(TPLS_IN_THIS, manager.list().await.unwrap().templates.len());
+
         manager.uninstall("http-rust").await.unwrap();
 
         let installed = manager.list().await.unwrap();
@@ -660,15 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_install_if_some_already_exist() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
         manager.uninstall("http-rust").await.unwrap();
         manager.uninstall("http-go").await.unwrap();
         assert_eq!(
@@ -676,10 +708,7 @@ mod tests {
             manager.list().await.unwrap().templates.len()
         );
 
-        let install_result = manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let install_result = manager.install_this_repo_templates().await;
         assert_eq!(2, install_result.installed.len());
         assert_eq!(TPLS_IN_THIS - 2, install_result.skipped.len());
 
@@ -691,21 +720,14 @@ mod tests {
 
     #[tokio::test]
     async fn can_update_existing() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
         manager.uninstall("http-rust").await.unwrap();
         assert_eq!(
             TPLS_IN_THIS - 1,
             manager.list().await.unwrap().templates.len()
         );
 
+        let source = TemplateSource::File(project_root());
         let install_result = manager
             .install(
                 &source,
@@ -724,15 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_read_installed_template() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let template = manager.get("http-rust").unwrap().unwrap();
         assert_eq!(
@@ -741,7 +755,7 @@ mod tests {
         );
 
         let content_dir = template.content_dir().as_ref().unwrap();
-        let cargo = tokio::fs::read_to_string(content_dir.join("Cargo.toml"))
+        let cargo = tokio::fs::read_to_string(content_dir.join("Cargo.toml.tmpl"))
             .await
             .unwrap();
         assert!(cargo.contains("name = \"{{project-name | kebab_case}}\""));
@@ -749,34 +763,14 @@ mod tests {
 
     #[tokio::test]
     async fn can_run_template() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let template = manager.get("http-rust").unwrap().unwrap();
 
         let dest_temp_dir = tempdir().unwrap();
         let output_dir = dest_temp_dir.path().join("myproj");
-        let values = [
-            ("project-description".to_owned(), "my desc".to_owned()),
-            ("http-base".to_owned(), "/base".to_owned()),
-            ("http-path".to_owned(), "/path/...".to_owned()),
-        ]
-        .into_iter()
-        .collect();
-        let options = RunOptions {
-            variant: crate::template::TemplateVariantInfo::NewApplication,
-            output_path: output_dir.clone(),
-            name: "my project".to_owned(),
-            values,
-            accept_defaults: false,
-        };
+
+        let options = run_options("my project", &output_dir, |_| {});
 
         template.run(options).silent().await.unwrap();
 
@@ -788,28 +782,16 @@ mod tests {
 
     #[tokio::test]
     async fn can_run_template_with_accept_defaults() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let template = manager.get("http-rust").unwrap().unwrap();
 
         let dest_temp_dir = tempdir().unwrap();
         let output_dir = dest_temp_dir.path().join("myproj");
-        let values = HashMap::new();
-        let options = RunOptions {
-            variant: crate::template::TemplateVariantInfo::NewApplication,
-            output_path: output_dir.clone(),
-            name: "my project".to_owned(),
-            values,
-            accept_defaults: true,
-        };
+        let options = run_options("my project", &output_dir, |opts| {
+            opts.values = HashMap::new();
+            opts.accept_defaults = true;
+        });
 
         template.run(options).silent().await.unwrap();
 
@@ -824,56 +806,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_use_custom_filter_in_template() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(test_data_root());
+    async fn cannot_use_custom_filter_in_template() {
+        let manager = TempManager::new();
 
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let install_results = manager.install_test_data_templates().await;
 
-        let template = manager.get("testing-custom-filter").unwrap().unwrap();
+        assert_eq!(1, install_results.skipped.len());
 
-        let dest_temp_dir = tempdir().unwrap();
-        let output_dir = dest_temp_dir.path().join("myproj");
-        let values = [
-            ("p1".to_owned(), "biscuits".to_owned()),
-            ("p2".to_owned(), "nomnomnom".to_owned()),
-        ]
-        .into_iter()
-        .collect();
-        let options = RunOptions {
-            variant: crate::template::TemplateVariantInfo::NewApplication,
-            output_path: output_dir.clone(),
-            name: "custom-filter-test".to_owned(),
-            values,
-            accept_defaults: false,
+        let (id, reason) = &install_results.skipped[0];
+        assert_eq!("testing-custom-filter", id);
+        let SkippedReason::InvalidManifest(message) = reason else {
+            panic!("skip reason should be InvalidManifest"); // clippy dislikes assert!(false...)
         };
-
-        template.run(options).silent().await.unwrap();
-
-        let message = tokio::fs::read_to_string(output_dir.join("test.txt"))
-            .await
-            .unwrap();
-        assert!(message.contains("p1/studly = bIsCuItS"));
-        assert!(message.contains("p2/studly = nOmNoMnOm"));
-        assert!(message.contains("p1/clappy = b👏i👏s👏c👏u👏i👏t👏s"));
+        assert_contains(message, "filters");
+        assert_contains(message, "not supported");
     }
 
     #[tokio::test]
     async fn can_add_component_from_template() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let dest_temp_dir = tempdir().unwrap();
         let application_dir = dest_temp_dir.path().join("multi");
@@ -882,19 +833,9 @@ mod tests {
         {
             let template = manager.get("http-empty").unwrap().unwrap();
 
-            let values = [
-                ("project-description".to_owned(), "my desc".to_owned()),
-                ("http-base".to_owned(), "/".to_owned()),
-            ]
-            .into_iter()
-            .collect();
-            let options = RunOptions {
-                variant: crate::template::TemplateVariantInfo::NewApplication,
-                output_path: application_dir.clone(),
-                name: "my multi project".to_owned(),
-                values,
-                accept_defaults: false,
-            };
+            let options = run_options("my multi project", &application_dir, |opts| {
+                opts.values = make_values([("project-description", "my desc")])
+            });
 
             template.run(options).silent().await.unwrap();
         }
@@ -906,22 +847,9 @@ mod tests {
         {
             let template = manager.get("http-rust").unwrap().unwrap();
 
-            let output_dir = "hello";
-            let values = [
-                ("project-description".to_owned(), "hello".to_owned()),
-                ("http-path".to_owned(), "/hello".to_owned()),
-            ]
-            .into_iter()
-            .collect();
-            let options = RunOptions {
-                variant: crate::template::TemplateVariantInfo::AddComponent {
-                    manifest_path: spin_toml_path.clone(),
-                },
-                output_path: PathBuf::from(output_dir),
-                name: "hello".to_owned(),
-                values,
-                accept_defaults: false,
-            };
+            let options = run_options("hello", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+            });
 
             template.run(options).silent().await.unwrap();
         }
@@ -930,22 +858,9 @@ mod tests {
         {
             let template = manager.get("http-rust").unwrap().unwrap();
 
-            let output_dir = "encore";
-            let values = [
-                ("project-description".to_owned(), "hello 2".to_owned()),
-                ("http-path".to_owned(), "/hello-2".to_owned()),
-            ]
-            .into_iter()
-            .collect();
-            let options = RunOptions {
-                variant: crate::template::TemplateVariantInfo::AddComponent {
-                    manifest_path: spin_toml_path.clone(),
-                },
-                output_path: PathBuf::from(output_dir),
-                name: "hello 2".to_owned(),
-                values,
-                accept_defaults: false,
-            };
+            let options = run_options("hello 2", "encore", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+            });
 
             template.run(options).silent().await.unwrap();
         }
@@ -961,21 +876,170 @@ mod tests {
         assert!(cargo2.contains("name = \"hello-2\""));
 
         let spin_toml = tokio::fs::read_to_string(&spin_toml_path).await.unwrap();
-        assert!(spin_toml.contains("source = \"hello/target/wasm32-wasi/release/hello.wasm\""));
-        assert!(spin_toml.contains("source = \"encore/target/wasm32-wasi/release/hello_2.wasm\""));
+        assert!(spin_toml.contains("source = \"hello/target/wasm32-wasip1/release/hello.wasm\""));
+        assert!(spin_toml.contains("source = \"encore/target/wasm32-wasip1/release/hello_2.wasm\""));
     }
 
     #[tokio::test]
-    async fn cannot_add_component_that_does_not_match_trigger() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
+    async fn can_add_variables_from_template() {
+        let manager = TempManager::new();
+        manager.install_test_data_templates().await;
+        manager.install_this_repo_templates().await; // We will need some of the standard templates too
 
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let dest_temp_dir = tempdir().unwrap();
+        let application_dir = dest_temp_dir.path().join("spinvars");
+
+        // Set up the containing app
+        {
+            let template = manager.get("http-rust").unwrap().unwrap();
+
+            let options = run_options("my various project", &application_dir, |_| {});
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        let spin_toml_path = application_dir.join("spin.toml");
+        assert!(spin_toml_path.exists(), "expected spin.toml to be created");
+
+        // Now add the variables
+        {
+            let template = manager.get("add-variables").unwrap().unwrap();
+
+            let options = run_options("insertvars", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+                opts.values = make_values([("service-url", "https://service.example.com")])
+            });
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        let spin_toml = tokio::fs::read_to_string(&spin_toml_path).await.unwrap();
+
+        assert!(spin_toml.contains("[variables]\nsecret"));
+        assert!(spin_toml.contains("url = { default = \"https://service.example.com\" }"));
+
+        assert!(spin_toml.contains("[component.insertvars]"));
+        assert!(spin_toml.contains("[component.insertvars.variables]"));
+        assert!(spin_toml.contains("kv_credentials = \"{{ secret }}\""));
+    }
+
+    #[tokio::test]
+    async fn can_overwrite_existing_variables() {
+        let manager = TempManager::new();
+        manager.install_test_data_templates().await;
+        manager.install_this_repo_templates().await; // We will need some of the standard templates too
+
+        let dest_temp_dir = tempdir().unwrap();
+        let application_dir = dest_temp_dir.path().join("spinvars");
+
+        // Set up the containing app
+        {
+            let template = manager.get("http-rust").unwrap().unwrap();
+
+            let options = run_options("my various project", &application_dir, |_| {});
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        let spin_toml_path = application_dir.join("spin.toml");
+        assert!(spin_toml_path.exists(), "expected spin.toml to be created");
+
+        // Now add the variables
+        {
+            let template = manager.get("add-variables").unwrap().unwrap();
+
+            let options = run_options("insertvars", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+                opts.values = make_values([("service-url", "https://service.example.com")]);
+            });
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        // Now add them again but with different values
+        {
+            let template = manager.get("add-variables").unwrap().unwrap();
+
+            let options = run_options("insertvarsagain", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+                opts.values = make_values([("service-url", "https://other.example.com")]);
+            });
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        let spin_toml = tokio::fs::read_to_string(&spin_toml_path).await.unwrap();
+        assert!(spin_toml.contains("url = { default = \"https://other.example.com\" }"));
+        assert!(!spin_toml.contains("service.example.com"));
+    }
+
+    #[tokio::test]
+    async fn component_new_no_vcs() {
+        let manager = TempManager::new_with_this_repo_templates().await;
+
+        let dest_temp_dir = tempdir().unwrap();
+        let application_dir = dest_temp_dir.path().join("no-vcs-new");
+
+        let template = manager.get("http-rust").unwrap().unwrap();
+
+        let options = run_options("no vcs new", &application_dir, |opts| {
+            opts.no_vcs = true;
+        });
+
+        template.run(options).silent().await.unwrap();
+        let gitignore = application_dir.join(".gitignore");
+        assert!(
+            !gitignore.exists(),
+            "expected .gitignore to not have been created"
+        );
+    }
+
+    #[tokio::test]
+    async fn component_add_no_vcs() {
+        let manager = TempManager::new_with_this_repo_templates().await;
+
+        let dest_temp_dir = tempdir().unwrap();
+        let application_dir = dest_temp_dir.path().join("no-vcs-add");
+
+        // Set up the containing app
+        {
+            let template = manager.get("http-empty").unwrap().unwrap();
+
+            let options = run_options("my multi project", &application_dir, |opts| {
+                opts.values = make_values([("project-description", "my desc")]);
+                opts.no_vcs = true;
+            });
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        let gitignore = application_dir.join(".gitignore");
+        let spin_toml_path = application_dir.join("spin.toml");
+        assert!(
+            !gitignore.exists(),
+            "expected .gitignore to not have been created"
+        );
+
+        {
+            let template = manager.get("http-rust").unwrap().unwrap();
+
+            let options = run_options("added_component", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+                opts.no_vcs = true;
+            });
+            template.run(options).silent().await.unwrap();
+        }
+
+        let gitignore_add = application_dir.join("hello").join(".gitignore");
+        assert!(
+            !gitignore_add.exists(),
+            "expected .gitignore to not have been created"
+        );
+    }
+
+    #[tokio::test]
+    async fn can_add_component_with_different_trigger() {
+        let manager = TempManager::new_with_this_repo_templates().await;
 
         let dest_temp_dir = tempdir().unwrap();
         let application_dir = dest_temp_dir.path().join("multi");
@@ -984,26 +1048,13 @@ mod tests {
         {
             let template = manager.get("redis-rust").unwrap().unwrap();
 
-            let values = [
-                ("project-description".to_owned(), "my desc".to_owned()),
-                (
-                    "redis-address".to_owned(),
-                    "redis://localhost:6379".to_owned(),
-                ),
-                (
-                    "redis-channel".to_owned(),
-                    "the-horrible-knuckles".to_owned(),
-                ),
-            ]
-            .into_iter()
-            .collect();
-            let options = RunOptions {
-                variant: crate::template::TemplateVariantInfo::NewApplication,
-                output_path: application_dir.clone(),
-                name: "my multi project".to_owned(),
-                values,
-                accept_defaults: false,
-            };
+            let options = run_options("my multi project", &application_dir, |opts| {
+                opts.values = make_values([
+                    ("project-description", "my desc"),
+                    ("redis-address", "redis://localhost:6379"),
+                    ("redis-channel", "the-horrible-knuckles"),
+                ])
+            });
 
             template.run(options).silent().await.unwrap();
         }
@@ -1015,22 +1066,48 @@ mod tests {
         {
             let template = manager.get("http-rust").unwrap().unwrap();
 
-            let output_dir = "hello";
-            let values = [
-                ("project-description".to_owned(), "hello".to_owned()),
-                ("http-path".to_owned(), "/hello".to_owned()),
-            ]
-            .into_iter()
-            .collect();
-            let options = RunOptions {
-                variant: crate::template::TemplateVariantInfo::AddComponent {
-                    manifest_path: spin_toml_path.clone(),
-                },
-                output_path: PathBuf::from(output_dir),
-                name: "hello".to_owned(),
-                values,
-                accept_defaults: false,
-            };
+            let options = run_options("hello", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+            });
+
+            template.run(options).silent().await.unwrap();
+        }
+
+        let spin_toml = tokio::fs::read_to_string(&spin_toml_path).await.unwrap();
+        assert!(spin_toml.contains("[[trigger.redis]]"));
+        assert!(spin_toml.contains("[[trigger.http]]"));
+        assert!(spin_toml.contains("[component.my-multi-project]"));
+        assert!(spin_toml.contains("[component.hello]"));
+    }
+
+    #[tokio::test]
+    async fn cannot_add_component_that_does_not_match_manifest() {
+        let manager = TempManager::new_with_this_repo_templates().await;
+
+        let dest_temp_dir = tempdir().unwrap();
+        let application_dir = dest_temp_dir.path().join("multi");
+
+        // Set up the containing app
+        {
+            let fake_v1_src = test_data_root().join("v1manifest.toml");
+            let fake_v1_dest = application_dir.join("spin.toml");
+            tokio::fs::create_dir_all(&application_dir).await.unwrap();
+            tokio::fs::copy(fake_v1_src, fake_v1_dest).await.unwrap();
+        }
+
+        let spin_toml_path = application_dir.join("spin.toml");
+        assert!(
+            spin_toml_path.exists(),
+            "expected v1 spin.toml to be created"
+        );
+
+        // Now add a component
+        {
+            let template = manager.get("http-rust").unwrap().unwrap();
+
+            let options = run_options("hello", "hello", |opts| {
+                opts.variant = add_component_to(&spin_toml_path);
+            });
 
             template
                 .run(options)
@@ -1041,22 +1118,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cannot_new_a_component_only_template() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(project_root());
+    async fn cannot_generate_over_existing_files_by_default() {
+        let manager = TempManager::new_with_this_repo_templates().await;
 
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
+        let template = manager.get("http-rust").unwrap().unwrap();
+
+        let dest_temp_dir = tempdir().unwrap();
+        let output_dir = dest_temp_dir.path().join("myproj");
+
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let manifest_path = output_dir.join("spin.toml");
+        tokio::fs::write(&manifest_path, "cookies").await.unwrap();
+
+        let options = run_options("my project", &output_dir, |_| {});
+
+        template
+            .run(options)
+            .silent()
             .await
-            .unwrap();
+            .expect_err("generate into existing dir should have failed");
 
-        let dummy_dir = temp_dir.path().join("dummy");
+        assert!(tokio::fs::read_to_string(&manifest_path)
+            .await
+            .unwrap()
+            .contains("cookies"));
+    }
+
+    #[tokio::test]
+    async fn can_generate_over_existing_files_if_so_configured() {
+        let manager = TempManager::new_with_this_repo_templates().await;
+
+        let template = manager.get("http-rust").unwrap().unwrap();
+
+        let dest_temp_dir = tempdir().unwrap();
+        let output_dir = dest_temp_dir.path().join("myproj");
+
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let manifest_path = output_dir.join("spin.toml");
+        tokio::fs::write(&manifest_path, "cookies").await.unwrap();
+
+        let options = run_options("my project", &output_dir, |opts| {
+            opts.allow_overwrite = true;
+        });
+
+        template
+            .run(options)
+            .silent()
+            .await
+            .expect("generate into existing dir should have succeeded");
+
+        assert!(tokio::fs::read_to_string(&manifest_path)
+            .await
+            .unwrap()
+            .contains("[[trigger.http]]"));
+    }
+
+    #[tokio::test]
+    async fn cannot_new_a_component_only_template() {
+        let manager = TempManager::new();
+        manager.install_test_data_templates().await;
+        manager.install_this_repo_templates().await;
+
+        let dummy_dir = manager.store_dir().join("dummy");
         let manifest_path = dummy_dir.join("ignored_spin.toml");
         let add_component = TemplateVariantInfo::AddComponent { manifest_path };
 
-        let redirect = manager.get("redirect").unwrap().unwrap();
+        let redirect = manager.get("add-only-redirect").unwrap().unwrap();
         assert!(!redirect.supports_variant(&TemplateVariantInfo::NewApplication));
         assert!(redirect.supports_variant(&add_component));
 
@@ -1071,30 +1198,16 @@ mod tests {
 
     #[tokio::test]
     async fn fails_on_unknown_filter() {
-        let temp_dir = tempdir().unwrap();
-        let store = TemplateStore::new(temp_dir.path());
-        let manager = TemplateManager { store };
-        let source = TemplateSource::File(test_data_root());
-
-        manager
-            .install(&source, &InstallOptions::default(), &DiscardingReporter)
-            .await
-            .unwrap();
+        let manager = TempManager::new();
+        manager.install_test_data_templates().await;
 
         let template = manager.get("bad-non-existent-filter").unwrap().unwrap();
 
         let dest_temp_dir = tempdir().unwrap();
         let output_dir = dest_temp_dir.path().join("myproj");
-        let values = [("p1".to_owned(), "biscuits".to_owned())]
-            .into_iter()
-            .collect();
-        let options = RunOptions {
-            variant: crate::template::TemplateVariantInfo::NewApplication,
-            output_path: output_dir.clone(),
-            name: "bad-filter-should-fail ".to_owned(),
-            values,
-            accept_defaults: false,
-        };
+        let options = run_options("bad-filter-should-fail", &output_dir, move |opts| {
+            opts.values = make_values([("p1", "biscuits")]);
+        });
 
         let err = template
             .run(options)

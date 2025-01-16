@@ -1,50 +1,77 @@
-use serde::{Deserialize, Serialize};
-use spin_loader::local::config::FixedStringVersion;
-use std::path::PathBuf;
+use anyhow::Result;
+use serde::Deserialize;
+use std::{collections::BTreeMap, path::Path};
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum BuildAppInfoAnyVersion {
-    V1Old {
-        #[allow(dead_code)]
-        spin_version: FixedStringVersion<1>,
-        #[serde(flatten)]
-        manifest: BuildAppInfoV1,
-    },
-    V1New {
-        #[allow(dead_code)]
-        spin_manifest_version: FixedStringVersion<1>,
-        #[serde(flatten)]
-        manifest: BuildAppInfoV1,
-    },
-}
-impl BuildAppInfoAnyVersion {
-    pub fn into_v1(self) -> BuildAppInfoV1 {
-        match self {
-            BuildAppInfoAnyVersion::V1New { manifest, .. } => manifest,
-            BuildAppInfoAnyVersion::V1Old { manifest, .. } => manifest,
-        }
+use spin_manifest::{schema::v2, ManifestVersion};
+
+/// Returns a map of component IDs to [`v2::ComponentBuildConfig`]s for the
+/// given (v1 or v2) manifest path. If the manifest cannot be loaded, the
+/// function attempts fallback: if fallback succeeds, result is Ok but the load error
+/// is also returned via the second part of the return value tuple.
+pub async fn component_build_configs(
+    manifest_file: impl AsRef<Path>,
+) -> Result<(Vec<ComponentBuildInfo>, Option<spin_manifest::Error>)> {
+    let manifest = spin_manifest::manifest_from_file(&manifest_file);
+    match manifest {
+        Ok(manifest) => Ok((build_configs_from_manifest(manifest), None)),
+        Err(e) => fallback_load_build_configs(&manifest_file)
+            .await
+            .map(|bc| (bc, Some(e))),
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct BuildAppInfoV1 {
-    #[serde(rename = "component")]
-    pub components: Vec<RawComponentManifest>,
+fn build_configs_from_manifest(
+    mut manifest: spin_manifest::schema::v2::AppManifest,
+) -> Vec<ComponentBuildInfo> {
+    spin_manifest::normalize::normalize_manifest(&mut manifest);
+
+    manifest
+        .components
+        .into_iter()
+        .map(|(id, c)| ComponentBuildInfo {
+            id: id.to_string(),
+            build: c.build,
+        })
+        .collect()
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct RawComponentManifest {
+async fn fallback_load_build_configs(
+    manifest_file: impl AsRef<Path>,
+) -> Result<Vec<ComponentBuildInfo>> {
+    let manifest_text = tokio::fs::read_to_string(manifest_file).await?;
+    Ok(match ManifestVersion::detect(&manifest_text)? {
+        ManifestVersion::V1 => {
+            let v1: ManifestV1BuildInfo = toml::from_str(&manifest_text)?;
+            v1.components
+        }
+        ManifestVersion::V2 => {
+            let v2: ManifestV2BuildInfo = toml::from_str(&manifest_text)?;
+            v2.components
+                .into_iter()
+                .map(|(id, mut c)| {
+                    c.id = id;
+                    c
+                })
+                .collect()
+        }
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ComponentBuildInfo {
+    #[serde(default)]
     pub id: String,
-    pub build: Option<RawBuildConfig>,
+    pub build: Option<v2::ComponentBuildConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub(crate) struct RawBuildConfig {
-    pub command: String,
-    pub workdir: Option<PathBuf>,
-    pub watch: Option<Vec<String>>,
+#[derive(Deserialize)]
+struct ManifestV1BuildInfo {
+    #[serde(rename = "component")]
+    components: Vec<ComponentBuildInfo>,
+}
+
+#[derive(Deserialize)]
+struct ManifestV2BuildInfo {
+    #[serde(rename = "component")]
+    components: BTreeMap<String, ComponentBuildInfo>,
 }

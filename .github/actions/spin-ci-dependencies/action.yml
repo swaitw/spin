@@ -8,7 +8,7 @@ inputs:
     type: bool
   rust-version:
     description: 'Rust version to setup'
-    default: '1.68'
+    default: '1.81'
     required: false
     type: string
 
@@ -17,22 +17,16 @@ inputs:
     required: false
     default: 'false'
     type: bool
+  rust-cross:
+    description: 'setup rust cross'
+    required: false
+    default: 'false'
+    type: bool
   rust-cache:
     description: 'setup rust cache'
     required: false
     default: 'false'
     type: bool
-
-  bindle:
-    description: 'setup bindle'
-    required: false
-    default: 'false'
-    type: bool
-  bindle-version:
-    description: 'Bindle version to setup'
-    default: 'v0.8.0'
-    required: false
-    type: string
 
   nomad:
     description: 'setup nomad'
@@ -45,17 +39,6 @@ inputs:
     required: false
     type: string
 
-  hippo:
-    description: 'setup hippo'
-    required: false
-    default: 'false'
-    type: bool
-  hippo-version:
-    description: 'Hippo version to setup'
-    default: 'v0.19.0'
-    required: false
-    type: string
-
   golang:
     description: 'setup golang'
     required: false
@@ -63,7 +46,7 @@ inputs:
     type: bool
   golang-version:
     description: 'golang version to setup'
-    default: '1.20'
+    default: '1.22'
     required: false
     type: string
 
@@ -85,37 +68,52 @@ inputs:
     type: bool
   tinygo-version:
     description: 'tinygo version to setup'
-    default: 'v0.27.0'
+    default: 'v0.35.0'
     required: false
     type: string
+
+  docker:
+    description: 'setup docker'
+    required: false
+    default: 'false'
+    type: bool
+
+  openssl-windows:
+    description: 'setup openssl on windows'
+    required: false
+    default: 'false'
+    type: bool
 
 runs:
   using: "composite"
   steps:
     - name: Install latest Rust stable toolchain
-      uses: actions-rs/toolchain@v1
+      shell: bash
       if: ${{ inputs.rust == 'true' }}
-      with:
-        toolchain: ${{ inputs.rust-version }}
-        default: true
-        components: clippy, rustfmt
+      run: |
+        rustup toolchain install ${{ inputs.rust-version }} --component clippy --component rustfmt --no-self-update
+        rustup default ${{ inputs.rust-version }}
 
     - name: "Install Wasm Rust target"
-      run: rustup target add wasm32-wasi && rustup target add wasm32-unknown-unknown
+      run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       if: ${{ inputs.rust-wasm == 'true' }}
+      shell: bash
+
+    - name: "Install cross-rs"
+      run: cargo install cross
+      if: ${{ inputs.rust-cross == 'true' }}
+      shell: bash
+
+    # hashFiles only works on files in the workspace
+    - name: "Copy os-release for cache key"
+      run: cp /etc/os-release .
+      if: ${{ runner.os == 'Linux' }}
       shell: bash
 
     - uses: Swatinem/rust-cache@v2
       if: ${{ inputs.rust-cache == 'true' }}
       with:
-        shared-key: "${{ runner.os }}-full-${{ hashFiles('./Cargo.lock') }}"
-
-    ## Install bindle
-    - name: Install bindle
-      uses: rajatjindal/setup-actions/bindle@v0.0.1
-      if: ${{ inputs.bindle == 'true' }}
-      with:
-        version: ${{ inputs.bindle-version }}
+        shared-key: "${{ runner.os }}-full-${{ hashFiles('./Cargo.lock', './os-release') }}"
 
     ## Install nomad
     - name: Install nomad
@@ -123,14 +121,6 @@ runs:
       if: ${{ inputs.nomad == 'true' }}
       with:
         version: ${{ inputs.nomad-version }}
-
-
-    ## Install hippo
-    - name: Install hippo
-      uses: rajatjindal/setup-actions/hippo@v0.0.1
-      if: ${{ inputs.hippo == 'true' }}
-      with:
-        version: ${{ inputs.hippo-version }}
 
     ## Install wasmtime
     - name: Install wasmtime
@@ -151,3 +141,11 @@ runs:
       if: ${{ inputs.tinygo == 'true' }}
       with:
         version: ${{ inputs.tinygo-version }}
+
+    ## Install openssl
+    - name: "Install openssl on windows"
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+      shell: pwsh
+      if: ${{ inputs.openssl-windows == 'true' }}

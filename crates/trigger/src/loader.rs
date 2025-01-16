@@ -1,106 +1,132 @@
-#![allow(dead_code)] // Refactor WIP
+use anyhow::Context as _;
+use spin_common::{ui::quoted_path, url::parse_file_url};
+use spin_core::{async_trait, wasmtime, Component};
+use spin_factors::AppComponent;
 
-use std::path::PathBuf;
-
-use anyhow::{ensure, Context, Result};
-use async_trait::async_trait;
-use spin_app::{
-    locked::{LockedApp, LockedComponentSource},
-    AppComponent, Loader,
-};
-use spin_core::StoreBuilder;
-use tokio::fs;
-
-use crate::parse_file_url;
-
-pub struct TriggerLoader {
-    working_dir: PathBuf,
-    allow_transient_write: bool,
+#[derive(Default)]
+pub struct ComponentLoader {
+    _private: (),
+    #[cfg(feature = "unsafe-aot-compilation")]
+    aot_compilation_enabled: bool,
 }
 
-impl TriggerLoader {
-    pub fn new(working_dir: impl Into<PathBuf>, allow_transient_write: bool) -> Self {
-        Self {
-            working_dir: working_dir.into(),
-            allow_transient_write,
+impl ComponentLoader {
+    /// Create a new `ComponentLoader`
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Updates the TriggerLoader to load AOT precompiled components
+    ///
+    /// **Warning: This feature may bypass important security guarantees of the
+    /// Wasmtime security sandbox if used incorrectly! Read this documentation
+    /// carefully.**
+    ///
+    /// Usually, components are compiled just-in-time from portable Wasm
+    /// sources. This method causes components to instead be loaded
+    /// ahead-of-time as Wasmtime-precompiled native executable binaries.
+    /// Precompiled binaries must be produced with a compatible Wasmtime engine
+    /// using the same Wasmtime version and compiler target settings - typically
+    /// by a host with the same processor that will be executing them. See the
+    /// Wasmtime documentation for more information:
+    /// https://docs.rs/wasmtime/latest/wasmtime/struct.Module.html#method.deserialize
+    ///
+    /// # Safety
+    ///
+    /// This method is marked as `unsafe` because it enables potentially unsafe
+    /// behavior if used to load malformed or malicious precompiled binaries.
+    /// Loading sources from an incompatible Wasmtime engine will fail but is
+    /// otherwise safe. This method is safe if it can be guaranteed that
+    /// `<TriggerLoader as Loader>::load_component` will only ever be called
+    /// with a trusted `LockedComponentSource`. **Precompiled binaries must
+    /// never be loaded from untrusted sources.**
+    #[cfg(feature = "unsafe-aot-compilation")]
+    pub unsafe fn enable_loading_aot_compiled_components(&mut self) {
+        self.aot_compilation_enabled = true;
+    }
+
+    #[cfg(feature = "unsafe-aot-compilation")]
+    fn load_precompiled_component(
+        &self,
+        engine: &wasmtime::Engine,
+        path: &std::path::Path,
+    ) -> anyhow::Result<Component> {
+        assert!(self.aot_compilation_enabled);
+        match engine.detect_precompiled_file(path)? {
+            Some(wasmtime::Precompiled::Component) => unsafe {
+                Component::deserialize_file(engine, path)
+            },
+            Some(wasmtime::Precompiled::Module) => {
+                anyhow::bail!("expected AOT compiled component but found module");
+            }
+            None => {
+                anyhow::bail!("expected AOT compiled component but found other data");
+            }
         }
     }
 }
 
 #[async_trait]
-impl Loader for TriggerLoader {
-    async fn load_app(&self, url: &str) -> Result<LockedApp> {
-        let path = parse_file_url(url)?;
-        let contents =
-            std::fs::read(&path).with_context(|| format!("failed to read manifest at {path:?}"))?;
-        let app =
-            serde_json::from_slice(&contents).context("failed to parse app lock file JSON")?;
-        Ok(app)
-    }
-
+impl spin_factors_executor::ComponentLoader for ComponentLoader {
     async fn load_component(
         &self,
-        engine: &spin_core::wasmtime::Engine,
-        source: &LockedComponentSource,
-    ) -> Result<spin_core::Component> {
-        let source = source
-            .content
-            .source
-            .as_ref()
-            .context("LockedComponentSource missing source field")?;
-        let path = parse_file_url(source)?;
-        spin_core::Component::new(
-            engine,
-            spin_componentize::componentize_if_necessary(&fs::read(&path).await.with_context(
-                || {
-                    format!(
-                        "failed to read component source from disk at path '{}'",
-                        path.display()
-                    )
-                },
-            )?)?,
-        )
-        .with_context(|| format!("loading module {path:?}"))
-    }
-
-    async fn load_module(
-        &self,
-        engine: &spin_core::wasmtime::Engine,
-        source: &LockedComponentSource,
-    ) -> Result<spin_core::Module> {
-        let source = source
-            .content
-            .source
-            .as_ref()
-            .context("LockedComponentSource missing source field")?;
-        let path = parse_file_url(source)?;
-        spin_core::Module::from_file(engine, &path)
-            .with_context(|| format!("loading module {path:?}"))
-    }
-
-    async fn mount_files(
-        &self,
-        store_builder: &mut StoreBuilder,
+        engine: &wasmtime::Engine,
         component: &AppComponent,
-    ) -> Result<()> {
-        for content_dir in component.files() {
-            let source_uri = content_dir
-                .content
-                .source
-                .as_deref()
-                .with_context(|| format!("Missing 'source' on files mount {content_dir:?}"))?;
-            let source_path = self.working_dir.join(parse_file_url(source_uri)?);
-            ensure!(
-                source_path.is_dir(),
-                "TriggerLoader only supports directory mounts; {source_path:?} is not a directory"
-            );
-            let guest_path = content_dir.path.clone();
-            if self.allow_transient_write {
-                store_builder.read_write_preopened_dir(source_path, guest_path)?;
-            } else {
-                store_builder.read_only_preopened_dir(source_path, guest_path)?;
-            }
+    ) -> anyhow::Result<Component> {
+        let source = component
+            .source()
+            .content
+            .source
+            .as_ref()
+            .context("LockedComponentSource missing source field")?;
+        let path = parse_file_url(source)?;
+
+        #[cfg(feature = "unsafe-aot-compilation")]
+        if self.aot_compilation_enabled {
+            return self
+                .load_precompiled_component(engine, &path)
+                .with_context(|| format!("error deserializing component from {path:?}"));
         }
-        Ok(())
+
+        let composed = spin_compose::compose(&ComponentSourceLoader, component.locked)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to resolve dependencies for component {:?}",
+                    component.locked.id
+                )
+            })?;
+
+        spin_core::Component::new(engine, composed)
+            .with_context(|| format!("failed to compile component from {}", quoted_path(&path)))
+    }
+}
+
+struct ComponentSourceLoader;
+
+#[async_trait]
+impl spin_compose::ComponentSourceLoader for ComponentSourceLoader {
+    async fn load_component_source(
+        &self,
+        source: &spin_app::locked::LockedComponentSource,
+    ) -> anyhow::Result<Vec<u8>> {
+        let source = source
+            .content
+            .source
+            .as_ref()
+            .context("LockedComponentSource missing source field")?;
+
+        let path = parse_file_url(source)?;
+
+        let bytes: Vec<u8> = tokio::fs::read(&path).await.with_context(|| {
+            format!(
+                "failed to read component source from disk at path {}",
+                quoted_path(&path)
+            )
+        })?;
+
+        let component = spin_componentize::componentize_if_necessary(&bytes)?;
+
+        Ok(component.into())
     }
 }

@@ -22,10 +22,10 @@ jobs:
           rust-cache: true
 
       - name: Cargo Build
-        run: cargo build --workspace --all-targets --all-features --features openssl/vendored
+        run: cargo build --workspace --all-targets --features all-tests --features openssl/vendored
 
       - name: "Archive executable artifact"
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: spin-ubuntu-latest
           path: target/debug/spin
@@ -43,9 +43,7 @@ jobs:
         with:
           rust: true
           rust-wasm: true
-          bindle: true
           nomad: true
-          hippo: true
 
       - name: Install cargo-tarpaulin binary crate
         uses: actions-rs/install@v0.1
@@ -55,7 +53,7 @@ jobs:
           use-tool-cache: true
 
       - name: Cargo Tarpaulin
-        run: cargo tarpaulin --follow-exec --skip-clean -t 6000 --out xml --features openssl/vendored,default,fermyon-platform
+        run: cargo tarpaulin --follow-exec --skip-clean -t 6000 --out xml --features openssl/vendored,default
         env:
           RUST_LOG: spin=trace
 
@@ -70,7 +68,7 @@ jobs:
           verbose: true
 
       - name: Archive code coverage results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: ${{ github.ref == 'refs/heads/main' }}
         with:
           name: code-coverage-report

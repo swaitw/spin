@@ -1,17 +1,18 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
+use spin_common::data_dir::data_dir;
 use std::{
     ffi::OsStr,
     fs::{self, File},
     path::{Path, PathBuf},
 };
 use tar::Archive;
-use tracing::log;
 
 use crate::{error::*, manifest::PluginManifest};
 
 /// Directory where the manifests of installed plugins are stored.
 pub const PLUGIN_MANIFESTS_DIRECTORY_NAME: &str = "manifests";
+const INSTALLATION_RECORD_FILE_NAME: &str = ".install.json";
 
 /// Houses utilities for getting the path to Spin plugin directories.
 pub struct PluginStore {
@@ -24,14 +25,7 @@ impl PluginStore {
     }
 
     pub fn try_default() -> Result<Self> {
-        let data_dir = match std::env::var("TEST_PLUGINS_DIRECTORY") {
-            Ok(test_dir) => PathBuf::from(test_dir),
-            Err(_) => dirs::data_local_dir()
-                .or_else(|| dirs::home_dir().map(|p| p.join(".spin")))
-                .ok_or_else(|| anyhow!("Unable to get local data directory or home directory"))?,
-        };
-        let plugins_dir = data_dir.join("spin").join("plugins");
-        Ok(Self::new(plugins_dir))
+        Ok(Self::new(data_dir()?.join("plugins")))
     }
 
     /// Gets the path to where Spin plugin are installed.
@@ -61,6 +55,12 @@ impl PluginStore {
             binary.set_extension("exe");
         }
         binary
+    }
+
+    pub fn installation_record_file(&self, plugin_name: &str) -> PathBuf {
+        self.root
+            .join(plugin_name)
+            .join(INSTALLATION_RECORD_FILE_NAME)
     }
 
     pub fn installed_manifests(&self) -> Result<Vec<PluginManifest>> {
@@ -125,7 +125,7 @@ impl PluginStore {
     /// Looks up and parses the JSON plugin manifest file into object form.
     pub fn read_plugin_manifest(&self, plugin_name: &str) -> PluginLookupResult<PluginManifest> {
         let manifest_path = self.installed_manifest_path(plugin_name);
-        log::info!("Reading plugin manifest from {}", manifest_path.display());
+        tracing::info!("Reading plugin manifest from {}", manifest_path.display());
         let manifest_file = File::open(manifest_path.clone()).map_err(|e| {
             Error::NotFound(NotFoundError::new(
                 Some(plugin_name.to_string()),
@@ -150,7 +150,7 @@ impl PluginStore {
             &File::create(self.installed_manifest_path(&plugin_manifest.name()))?,
             plugin_manifest,
         )?;
-        log::trace!("Added manifest for {}", &plugin_manifest.name());
+        tracing::trace!("Added manifest for {}", &plugin_manifest.name());
         Ok(())
     }
 

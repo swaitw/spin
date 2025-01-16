@@ -5,20 +5,23 @@ authors = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
-anyhow = "1.0"
-async-trait = "0.1"
-crossbeam-channel = "0.5"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 tracing = { workspace = true }
-wasi-host = { workspace = true }
-wasi-common = { workspace = true }
-wasi-common-preview1 = { workspace = true }
-wasi-cap-std-sync = { workspace = true }
 wasmtime = { workspace = true }
-wasmtime-wasi = { workspace = true }
-system-interface = { version = "0.25.1", features = ["cap_std_impls"] }
-cap-std = "1.0.5"
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+serde_json = { workspace = true }
 spin-componentize = { workspace = true }
+spin-factor-wasi = { path = "../factor-wasi" }
+spin-factors = { path = "../factors" }
+spin-factors-test = { path = "../factors-test" }
+spin-locked-app = { path = "../locked-app" }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+wasmtime-wasi = { workspace = true }
+
+[features]
+# Enables support for the `wasmtime::Store::call_hook` API which enables injecting custom
+# logic around all entries/exits from WebAssembly. This has a slight performance
+# cost for all host functions.
+call-hook = ["wasmtime/call-hook"]

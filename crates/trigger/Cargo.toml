@@ -1,39 +1,44 @@
 [package]
 name = "spin-trigger"
-version = { workspace = true }
-authors = { workspace = true }
-edition = { workspace = true }
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Enables loading AOT compiled components, a potentially unsafe operation. See
+# `ComponentLoader::enable_loading_aot_compiled_components`
+# documentation for more information about the safety risks.
+unsafe-aot-compilation = []
 
 [dependencies]
-anyhow = "1.0"
-async-trait = "0.1"
-clap = { version = "3.1.15", features = ["derive", "env"] }
+anyhow = { workspace = true }
+clap = { version = "3.1.18", features = ["derive", "env"] }
 ctrlc = { version = "3.2", features = ["termination"] }
-dirs = "4"
-futures = "0.3"
-outbound-http = { path = "../outbound-http" }
-outbound-redis = { path = "../outbound-redis" }
-outbound-pg = { path = "../outbound-pg" }
-outbound-mysql = { path = "../outbound-mysql" }
-spin-key-value = { path = "../key-value" }
-spin-key-value-redis = { path = "../key-value-redis" }
-spin-key-value-sqlite = { path = "../key-value-sqlite" }
-sanitize-filename = "0.4"
-serde = "1.0"
-serde_json = "1.0"
+futures = { workspace = true }
+sanitize-filename = "0.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
 spin-app = { path = "../app" }
-spin-config = { path = "../config" }
+spin-common = { path = "../common" }
+spin-componentize = { path = "../componentize" }
+spin-compose = { path = "../compose" }
 spin-core = { path = "../core" }
-spin-loader = { path = "../loader" }
-spin-manifest = { path = "../manifest" }
-tokio = { version = "1.23", features = [ "full" ] }
-toml = "0.5.9"
+spin-factor-key-value = { path = "../factor-key-value" }
+spin-factor-sqlite = { path = "../factor-sqlite" }
+spin-factor-wasi = { path = "../factor-wasi" }
+spin-factors = { path = "../factors" }
+spin-factors-executor = { path = "../factors-executor" }
+spin-telemetry = { path = "../telemetry" }
+tokio = { workspace = true, features = ["fs", "rt"] }
 tracing = { workspace = true }
-url = "2"
-wasmtime = { workspace = true }
-spin-componentize = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.3.0"
-toml = "0.5"
-tokio = { version = "1.23", features = ["rt", "macros"] }
+spin-world = { path = "../world" }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

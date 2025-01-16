@@ -1,0 +1,20 @@
+[package]
+name = "testing-framework"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+http = "1.0"
+http-body-util = "0.1.0"
+log = "0.4"
+nix = "0.29"
+reqwest = { workspace = true }
+test-environment = { workspace = true }
+spin-app = { path = "../../crates/app" }
+spin-http = { path = "../../crates/http" }
+spin-loader = { path = "../../crates/loader" }
+spin-runtime-factors = { path = "../../crates/runtime-factors" }
+spin-trigger = { path = "../../crates/trigger" }
+spin-trigger-http = { path = "../../crates/trigger-http" }
+tokio = { workspace = true }

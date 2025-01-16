@@ -5,69 +5,112 @@
 mod manifest;
 
 use anyhow::{anyhow, bail, Context, Result};
-use spin_loader::local::parent_dir;
-use std::path::{Path, PathBuf};
+use manifest::ComponentBuildInfo;
+use spin_common::{paths::parent_dir, ui::quoted_path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use subprocess::{Exec, Redirection};
 
-use crate::manifest::{BuildAppInfoAnyVersion, RawComponentManifest};
+use crate::manifest::component_build_configs;
 
 /// If present, run the build command of each component.
-pub async fn build(manifest_file: &Path) -> Result<()> {
-    let manifest_text = tokio::fs::read_to_string(manifest_file)
-        .await
-        .with_context(|| format!("Cannot read manifest file from {}", manifest_file.display()))?;
-    let app = toml::from_str(&manifest_text).map(BuildAppInfoAnyVersion::into_v1)?;
+pub async fn build(manifest_file: &Path, component_ids: &[String]) -> Result<()> {
+    let (components, manifest_err) =
+        component_build_configs(manifest_file)
+            .await
+            .with_context(|| {
+                format!(
+                    "Cannot read manifest file from {}",
+                    quoted_path(manifest_file)
+                )
+            })?;
     let app_dir = parent_dir(manifest_file)?;
 
-    if app.components.iter().all(|c| c.build.is_none()) {
-        println!("No build command found!");
+    let build_result = build_components(component_ids, components, app_dir);
+
+    if let Some(e) = manifest_err {
+        terminal::warn!("The manifest has errors not related to the Wasm component build. Error details:\n{e:#}");
+    }
+
+    build_result
+}
+
+fn build_components(
+    component_ids: &[String],
+    components: Vec<ComponentBuildInfo>,
+    app_dir: PathBuf,
+) -> Result<(), anyhow::Error> {
+    let components_to_build = if component_ids.is_empty() {
+        components
+    } else {
+        let all_ids: HashSet<_> = components.iter().map(|c| &c.id).collect();
+        let unknown_component_ids: Vec<_> = component_ids
+            .iter()
+            .filter(|id| !all_ids.contains(id))
+            .map(|s| s.as_str())
+            .collect();
+
+        if !unknown_component_ids.is_empty() {
+            bail!("Unknown component(s) {}", unknown_component_ids.join(", "));
+        }
+
+        components
+            .into_iter()
+            .filter(|c| component_ids.contains(&c.id))
+            .collect()
+    };
+
+    if components_to_build.iter().all(|c| c.build.is_none()) {
+        println!("None of the components have a build command.");
+        println!("For information on specifying a build command, see https://developer.fermyon.com/spin/build#setting-up-for-spin-build.");
         return Ok(());
     }
 
-    app.components
+    components_to_build
         .into_iter()
         .map(|c| build_component(c, &app_dir))
         .collect::<Result<Vec<_>, _>>()?;
 
-    println!("Successfully ran the build command for the Spin components.");
+    terminal::step!("Finished", "building all Spin components");
     Ok(())
 }
 
 /// Run the build command of the component.
-fn build_component(raw: RawComponentManifest, app_dir: &Path) -> Result<()> {
-    match raw.build {
+fn build_component(build_info: ComponentBuildInfo, app_dir: &Path) -> Result<()> {
+    match build_info.build {
         Some(b) => {
-            println!(
-                "Executing the build command for component {}: {}",
-                raw.id, b.command
-            );
-            let workdir = construct_workdir(app_dir, b.workdir.as_ref())?;
-            if b.workdir.is_some() {
-                println!("Working directory: {:?}", workdir);
-            }
+            for command in b.commands() {
+                terminal::step!("Building", "component {} with `{}`", build_info.id, command);
+                let workdir = construct_workdir(app_dir, b.workdir.as_ref())?;
+                if b.workdir.is_some() {
+                    println!("Working directory: {}", quoted_path(&workdir));
+                }
 
-            let exit_status = Exec::shell(&b.command)
-                .cwd(workdir)
-                .stdout(Redirection::None)
-                .stderr(Redirection::None)
-                .stdin(Redirection::None)
-                .popen()
-                .map_err(|err| {
-                    anyhow!(
-                        "Cannot spawn build process '{:?}' for component {}: {}",
-                        &b.command,
-                        raw.id,
-                        err
-                    )
-                })?
-                .wait()?;
+                let exit_status = Exec::shell(command)
+                    .cwd(workdir)
+                    .stdout(Redirection::None)
+                    .stderr(Redirection::None)
+                    .stdin(Redirection::None)
+                    .popen()
+                    .map_err(|err| {
+                        anyhow!(
+                            "Cannot spawn build process '{:?}' for component {}: {}",
+                            &b.command,
+                            build_info.id,
+                            err
+                        )
+                    })?
+                    .wait()?;
 
-            if !exit_status.success() {
-                bail!(
-                    "Build command for component {} failed with status {:?}",
-                    raw.id,
-                    exit_status,
-                );
+                if !exit_status.success() {
+                    bail!(
+                        "Build command for component {} failed with status {:?}",
+                        build_info.id,
+                        exit_status,
+                    );
+                }
             }
 
             Ok(())
@@ -105,6 +148,6 @@ mod tests {
     #[tokio::test]
     async fn can_load_even_if_trigger_invalid() {
         let bad_trigger_file = test_data_root().join("bad_trigger.toml");
-        build(&bad_trigger_file).await.unwrap();
+        build(&bad_trigger_file, &[]).await.unwrap();
     }
 }

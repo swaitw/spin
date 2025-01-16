@@ -1,0 +1,17 @@
+[package]
+name = "runtime-tests"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+env_logger = "0.10.0"
+log = "0.4"
+testing-framework = { path = "../testing-framework" }
+test-environment = { workspace = true }
+test-components = { path = "../test-components" }

@@ -3,71 +3,72 @@ name = "spin-cli"
 version = { workspace = true }
 authors = { workspace = true }
 edition = { workspace = true }
-license = "Apache-2.0 WITH LLVM-exception"
-rust-version = "1.67"
+license = { workspace = true }
 
 [workspace.package]
-version = "1.2.0-pre0"
+version = "3.2.0-pre0"
 authors = ["Fermyon Engineering <engineering@fermyon.com>"]
 edition = "2021"
+license = "Apache-2.0 WITH LLVM-exception"
+homepage = "https://developer.fermyon.com/spin"
+repository = "https://github.com/fermyon/spin"
+rust-version = "1.81"
 
 [dependencies]
-anyhow = "1.0"
-async-trait = "0.1"
-bindle = { workspace = true }
-bytes = "1.1"
-chrono = "0.4"
-clap = { version = "3.1.15", features = ["derive", "env"] }
-cloud = { path = "crates/cloud" }
-cloud-openapi = { git = "https://github.com/fermyon/cloud-openapi" }
-comfy-table = "5.0"
-ctrlc = { version = "3.2", features = ["termination"] }
-dialoguer = "0.10"
-dirs = "4.0"
-dunce = "1.0"
-futures = "0.3"
-glob = "0.3.1"
-hippo-openapi = "0.10"
-hippo = { git = "https://github.com/deislabs/hippo-cli", tag = "v0.16.1" }
-is-terminal = "0.4"
-lazy_static = "1.4.0"
-levenshtein = "1.0.5"
-nix = { version = "0.24", features = ["signal"] }
-outbound-http = { path = "crates/outbound-http" }
-outbound-redis = { path = "crates/outbound-redis" }
-spin-key-value = { path = "crates/key-value" }
-spin-key-value-sqlite = { path = "crates/key-value-sqlite" }
-path-absolutize = "3.0.11"
-rand = "0.8"
-regex = "1.5.5"
-reqwest = { version = "0.11", features = ["stream"] }
-rpassword = "7.0"
-semver = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.82"
-sha2 = "0.10.2"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+clap = { version = "3.2.24", features = ["derive", "env"] }
+clearscreen = "3"
+comfy-table = "7"
+command-group = "2"
+ctrlc = { version = "3.4", features = ["termination"] }
+dialoguer = "0.11"
+futures = { workspace = true }
+http = { workspace = true }
+indicatif = "0.17"
+itertools = { workspace = true }
+lazy_static = "1.5"
+levenshtein = "1"
+nix = { version = "0.29", features = ["signal"] }
+path-absolutize = "3"
+regex = { workspace = true }
+reqwest = { workspace = true }
+rpassword = "7"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subprocess = "0.2"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }
+watchexec = { git = "https://github.com/watchexec/watchexec.git", rev = "8e91d26ef6400c1e60b32a8314cbb144fa33f288" }
+watchexec-filterer-globset = { git = "https://github.com/watchexec/watchexec.git", rev = "8e91d26ef6400c1e60b32a8314cbb144fa33f288" }
+
 spin-app = { path = "crates/app" }
-spin-bindle = { path = "crates/bindle" }
 spin-build = { path = "crates/build" }
-spin-config = { path = "crates/config" }
-spin-trigger-http = { path = "crates/trigger-http" }
+spin-common = { path = "crates/common" }
+spin-doctor = { path = "crates/doctor" }
+spin-factor-outbound-networking = { path = "crates/factor-outbound-networking" }
+spin-http = { path = "crates/http" }
 spin-loader = { path = "crates/loader" }
+spin-locked-app = { path = "crates/locked-app" }
 spin-manifest = { path = "crates/manifest" }
 spin-oci = { path = "crates/oci" }
 spin-plugins = { path = "crates/plugins" }
-spin-redis-engine = { path = "crates/redis" }
+spin-runtime-factors = { path = "crates/runtime-factors" }
+spin-telemetry = { path = "crates/telemetry", features = [
+  "tracing-log-compat",
+] }
 spin-templates = { path = "crates/templates" }
 spin-trigger = { path = "crates/trigger" }
-tempfile = "3.3.0"
-tokio = { version = "1.23", features = ["full"] }
-toml = "0.6"
-tracing = { workspace = true }
-tracing-subscriber = { version = "0.3.7", features = ["env-filter"] }
-url = "2.2.2"
-uuid = "^1.0"
-wasmtime = { workspace = true }
-watchexec = { git = "https://github.com/watchexec/watchexec.git", rev = "8e91d26ef6400c1e60b32a8314cbb144fa33f288" }
-subprocess = "0.2.9"
+spin-trigger-http = { path = "crates/trigger-http" }
+spin-trigger-redis = { path = "crates/trigger-redis" }
+terminal = { path = "crates/terminal" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # This needs to be an explicit dependency to enable
@@ -75,74 +76,90 @@ subprocess = "0.2.9"
 openssl = { version = "0.10" }
 
 [dev-dependencies]
-hyper = { version = "0.14", features = ["full"] }
-sha2 = "0.10.1"
-which = "4.2.5"
-e2e-testing = { path = "crates/e2e-testing" }
+anyhow = { workspace = true, features = ["backtrace"] }
+conformance = { path = "tests/conformance-tests" }
+conformance-tests = { workspace = true }
+hex = "0.4"
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+redis = "0.27"
+runtime-tests = { path = "tests/runtime-tests" }
+test-codegen-macro = { path = "crates/test-codegen-macro" }
+test-components = { path = "tests/test-components" }
+test-environment = { workspace = true }
+testing-framework = { path = "tests/testing-framework" }
 
 [build-dependencies]
-cargo-target-dep = { git = "https://github.com/fermyon/cargo-target-dep", rev = "b7b1989fe0984c0f7c4966398304c6538e52fe49" }
-vergen = { version = "7", default-features = false, features = [
+cargo-target-dep = { git = "https://github.com/fermyon/cargo-target-dep", rev = "482f269eceb7b1a7e8fc618bf8c082dd24979cf1" }
+vergen = { version = "^8.2.1", default-features = false, features = [
   "build",
   "git",
+  "gitcl",
+  "cargo",
 ] }
 
 [features]
-default = []
-e2e-tests = []
-outbound-redis-tests = []
-config-provider-tests = []
-outbound-pg-tests = []
-outbound-mysql-tests = []
-fermyon-platform = []
+default = ["llm"]
+all-tests = ["extern-dependencies-tests"]
+extern-dependencies-tests = []
+llm = ["spin-runtime-factors/llm"]
+llm-metal = ["llm", "spin-runtime-factors/llm-metal"]
+llm-cublas = ["llm", "spin-runtime-factors/llm-cublas"]
 
 [workspace]
 members = [
-  "crates/app",
-  "crates/bindle",
-  "crates/build",
-  "crates/config",
-  "crates/core",
-  "crates/http",
-  "crates/loader",
-  "crates/manifest",
-  "crates/oci",
-  "crates/outbound-http",
-  "crates/outbound-redis",
-  "crates/key-value",
-  "crates/key-value-sqlite",
-  "crates/key-value-redis",
-  "crates/plugins",
-  "crates/redis",
-  "crates/templates",
-  "crates/testing",
-  "crates/trigger",
-  "crates/trigger-http",
-  "sdk/rust",
-  "sdk/rust/macro",
-  "crates/e2e-testing"
+  "crates/*",
+  "tests/conformance-tests",
+  "tests/runtime-tests",
+  "tests/testing-framework",
 ]
 
 [workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+conformance-tests = { git = "https://github.com/fermyon/conformance-tests", rev = "ecd22a45bcc5c775a56c67689a89aa4005866ac0" }
+dirs = "5.0"
+futures = "0.3"
+glob = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+itertools = "0.13"
+opentelemetry = { version = "0.27", features = ["metrics", "trace", "logs"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "spec_unstable_logs_enabled", "metrics"] }
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", features = ["stream", "blocking"] }
+# In `rustls` turn off the `aws_lc_rs` default feature and turn on `ring`.
+# If both `aws_lc_rs` and `ring` are enabled, a panic at runtime will occur.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3"
+test-environment = { git = "https://github.com/fermyon/conformance-tests", rev = "ecd22a45bcc5c775a56c67689a89aa4005866ac0" }
+thiserror = "1"
+tokio = "1"
+toml = "0.8"
 tracing = { version = "0.1", features = ["log"] }
-wasmtime-wasi = { version = "7.0.0", features = ["tokio"] }
-wasi-common-preview1 = { package = "wasi-common", version = "7.0.0" }
-wasmtime = { version = "7.0.0", features = ["component-model"] }
-spin-componentize = { git = "https://github.com/fermyon/spin-componentize" }
-wasi-host = { package = "host", git = "https://github.com/fermyon/spin-componentize" }
-wasi-common = { git = "https://github.com/fermyon/spin-componentize" }
-wasi-cap-std-sync = { git = "https://github.com/fermyon/spin-componentize" }
+tracing-opentelemetry = { version = "0.28", default-features = false, features = ["metrics"] }
+url = "2"
+wasi-common-preview1 = { version = "25.0.0", package = "wasi-common", features = [
+  "tokio",
+] }
+wasm-pkg-common = "0.8"
+wasm-pkg-client = "0.8"
+wasmtime = "25.0.3"
+wasmtime-wasi = "25.0.0"
+wasmtime-wasi-http = "25.0.0"
 
-[workspace.dependencies.bindle]
-git = "https://github.com/fermyon/bindle"
-tag = "v0.8.2"
-default-features = false
-features = ["client"]
+spin-componentize = { path = "crates/componentize" }
 
-[workspace.dependencies.wit-bindgen-wasmtime]
-git = "https://github.com/fermyon/wit-bindgen-backport"
-rev = "e1e2525bbbc8430c4ebe57e9f4b3f63b6facff98"
-features = ["async"]
+[workspace.lints.clippy]
+# TODO: Remove this once https://github.com/rust-lang/rust-clippy/issues/12281 is resolved
+blocks_in_conditions = "allow"
 
 [[bin]]
 name = "spin"

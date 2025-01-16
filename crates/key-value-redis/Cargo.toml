@@ -1,12 +1,17 @@
 [package]
 name = "spin-key-value-redis"
-version = "0.1.0"
-edition = "2021"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
 
 [dependencies]
-anyhow = "1"
-redis = { version = "0.21", features = ["tokio-comp", "tokio-native-tls-comp"] }
-spin-key-value = { path = "../key-value" }
+anyhow = { workspace = true }
+redis = { version = "0.28", features = ["tokio-comp", "tokio-native-tls-comp", "connection-manager"] }
+serde = { workspace = true }
 spin-core = { path = "../core" }
-tokio = "1"
-url = "2"
+spin-factor-key-value = { path = "../factor-key-value" }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,43 @@
+[package]
+name = "spin-runtime-config"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+spin-common = { path = "../common" }
+spin-factor-key-value = { path = "../factor-key-value" }
+spin-factor-llm = { path = "../factor-llm" }
+spin-factor-outbound-http = { path = "../factor-outbound-http" }
+spin-factor-outbound-mqtt = { path = "../factor-outbound-mqtt" }
+spin-factor-outbound-mysql = { path = "../factor-outbound-mysql" }
+spin-factor-outbound-networking = { path = "../factor-outbound-networking" }
+spin-factor-outbound-pg = { path = "../factor-outbound-pg" }
+spin-factor-outbound-redis = { path = "../factor-outbound-redis" }
+spin-factor-sqlite = { path = "../factor-sqlite" }
+spin-factor-variables = { path = "../factor-variables" }
+spin-factor-wasi = { path = "../factor-wasi" }
+spin-factors = { path = "../factors" }
+spin-key-value-aws = { path = "../key-value-aws" }
+spin-key-value-azure = { path = "../key-value-azure" }
+spin-key-value-redis = { path = "../key-value-redis" }
+spin-key-value-spin = { path = "../key-value-spin" }
+spin-sqlite = { path = "../sqlite" }
+spin-trigger = { path = "../trigger" }
+spin-variables = { path = "../variables" }
+toml = { workspace = true }
+
+[dev-dependencies]
+spin-factors-test = { path = "../factors-test" }
+spin-world = { path = "../world" }
+tempfile = "3.2"
+tokio = { workspace = true, features = ["macros"] }
+toml = "0.8"
+
+[lints]
+workspace = true

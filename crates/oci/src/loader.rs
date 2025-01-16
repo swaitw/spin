@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, ensure, Context, Result};
 use oci_distribution::Reference;
 use reqwest::Url;
-use spin_app::locked::{ContentPath, ContentRef, LockedApp, LockedComponent};
+use spin_common::ui::quoted_path;
 use spin_loader::cache::Cache;
+use spin_locked_app::locked::{ContentPath, ContentRef, LockedApp, LockedComponent};
 
 use crate::{Client, ORIGIN_URL_SCHEME};
 
@@ -21,7 +22,7 @@ impl OciLoader {
         Self { working_dir }
     }
 
-    /// Loads a LockedApp with the given OCI client and reference.
+    /// Pulls and loads an OCI Artifact and returns a LockedApp with the given OCI client and reference
     pub async fn load_app(&self, client: &mut Client, reference: &str) -> Result<LockedApp> {
         // Fetch app
         client.pull(reference).await.with_context(|| {
@@ -33,11 +34,26 @@ impl OciLoader {
             .lockfile_path(&reference)
             .await
             .context("cannot get path to spin.lock")?;
+        self.load_from_cache(lockfile_path, reference, &client.cache)
+            .await
+    }
+
+    /// Loads an OCI Artifact from the given cache and returns a LockedApp with the given reference
+    pub async fn load_from_cache(
+        &self,
+        lockfile_path: PathBuf,
+        reference: &str,
+        cache: &Cache,
+    ) -> std::result::Result<LockedApp, anyhow::Error> {
         let locked_content = tokio::fs::read(&lockfile_path)
             .await
-            .with_context(|| format!("failed to read from {lockfile_path:?}"))?;
-        let mut locked_app = LockedApp::from_json(&locked_content)
-            .with_context(|| format!("failed to decode locked app from {lockfile_path:?}"))?;
+            .with_context(|| format!("failed to read from {}", quoted_path(&lockfile_path)))?;
+        let mut locked_app = LockedApp::from_json(&locked_content).with_context(|| {
+            format!(
+                "failed to decode locked app from {}",
+                quoted_path(&lockfile_path)
+            )
+        })?;
 
         // Update origin metadata
         let resolved_reference = Reference::try_from(reference).context("invalid reference")?;
@@ -47,7 +63,7 @@ impl OciLoader {
             .insert("origin".to_string(), origin_uri.into());
 
         for component in &mut locked_app.components {
-            self.resolve_component_content_refs(component, &client.cache)
+            self.resolve_component_content_refs(component, cache)
                 .await
                 .with_context(|| {
                     format!("failed to resolve content for component {:?}", component.id)
@@ -66,12 +82,15 @@ impl OciLoader {
         let wasm_path = cache.wasm_file(wasm_digest)?;
         component.source.content = content_ref(wasm_path)?;
 
-        if !component.files.is_empty() {
-            let mount_dir = self.working_dir.join(&component.id);
-            for file in &mut component.files {
-                let digest = content_digest(&file.content)?;
-                let content_path = cache.data_file(digest)?;
+        for dep in &mut component.dependencies.values_mut() {
+            let dep_wasm_digest = content_digest(&dep.source.content)?;
+            let dep_wasm_path = cache.wasm_file(dep_wasm_digest)?;
+            dep.source.content = content_ref(dep_wasm_path)?;
+        }
 
+        if !component.files.is_empty() {
+            let mount_dir = self.working_dir.join("assets").join(&component.id);
+            for file in &mut component.files {
                 ensure!(is_safe_to_join(&file.path), "invalid file mount {file:?}");
                 let mount_path = mount_dir.join(&file.path);
 
@@ -85,11 +104,27 @@ impl OciLoader {
                         format!("failed to create temporary mount path {mount_path:?}")
                     })?;
 
-                // Copy content
-                // TODO: parallelize
-                tokio::fs::copy(&content_path, &mount_path)
-                    .await
-                    .with_context(|| format!("failed to copy {content_path:?}->{mount_path:?}"))?;
+                if let Some(content_bytes) = file.content.inline.as_deref() {
+                    // Write inline content to disk
+                    tokio::fs::write(&mount_path, content_bytes)
+                        .await
+                        .with_context(|| {
+                            format!("failed to write inline content to {mount_path:?}")
+                        })?;
+                } else {
+                    // Copy content
+                    let digest = content_digest(&file.content)?;
+                    let content_path = cache.data_file(digest)?;
+                    // TODO: parallelize
+                    tokio::fs::copy(&content_path, &mount_path)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to copy {}->{mount_path:?}",
+                                quoted_path(&content_path)
+                            )
+                        })?;
+                }
             }
 
             component.files = vec![ContentPath {

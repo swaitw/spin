@@ -1,105 +1,80 @@
-use std::{net::SocketAddr, str, str::FromStr};
+use std::net::SocketAddr;
 
-use crate::{HttpExecutor, HttpTrigger, Store};
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use hyper::{Body, Request, Response};
-use spin_core::{
-    http_types::{self, Method, RequestParam},
-    Instance,
+use anyhow::Result;
+use http_body_util::BodyExt;
+use hyper::{Request, Response};
+use spin_factors::RuntimeFactors;
+use spin_http::body;
+use spin_http::routes::RouteMatch;
+use spin_world::v1::http_types;
+use tracing::{instrument, Level};
+
+use crate::{
+    headers::{append_headers, prepare_request_headers},
+    server::HttpExecutor,
+    Body, TriggerInstanceBuilder,
 };
-use spin_trigger::{EitherInstance, TriggerAppEngine};
 
+/// An [`HttpExecutor`] that uses the `fermyon:spin/inbound-http` interface.
 #[derive(Clone)]
 pub struct SpinHttpExecutor;
 
-#[async_trait]
 impl HttpExecutor for SpinHttpExecutor {
-    async fn execute(
+    #[instrument(name = "spin_trigger_http.execute_wasm", skip_all, err(level = Level::INFO), fields(otel.name = format!("execute_wasm_component {}", route_match.component_id())))]
+    async fn execute<F: RuntimeFactors>(
         &self,
-        engine: &TriggerAppEngine<HttpTrigger>,
-        component_id: &str,
-        base: &str,
-        raw_route: &str,
+        instance_builder: TriggerInstanceBuilder<'_, F>,
+        route_match: &RouteMatch,
         req: Request<Body>,
         client_addr: SocketAddr,
     ) -> Result<Response<Body>> {
-        tracing::trace!(
-            "Executing request using the Spin executor for component {}",
-            component_id
-        );
+        let component_id = route_match.component_id();
 
-        let (instance, store) = engine.prepare_instance(component_id).await?;
-        let EitherInstance::Component(instance) = instance else {
-            unreachable!()
-        };
+        tracing::trace!("Executing request using the Spin executor for component {component_id}");
 
-        let resp = Self::execute_impl(store, instance, base, raw_route, req, client_addr)
-            .await
-            .map_err(contextualise_err)?;
+        let (instance, mut store) = instance_builder.instantiate(()).await?;
 
-        tracing::info!(
-            "Request finished, sending response with status code {}",
-            resp.status()
-        );
-        Ok(resp)
-    }
-}
+        let headers = prepare_request_headers(&req, route_match, client_addr)?;
+        // Expects here are safe since we have already checked that this
+        // instance exists
+        let inbound_http = instance
+            .get_export(&mut store, None, "fermyon:spin/inbound-http")
+            .expect("no fermyon:spin/inbound-http found");
+        let handle_request = instance
+            .get_export(&mut store, Some(&inbound_http), "handle-request")
+            .expect("no handle-request found");
+        let func = instance.get_typed_func::<(http_types::Request,), (http_types::Response,)>(
+            &mut store,
+            &handle_request,
+        )?;
 
-impl SpinHttpExecutor {
-    pub async fn execute_impl(
-        mut store: Store,
-        instance: Instance,
-        base: &str,
-        raw_route: &str,
-        req: Request<Body>,
-        client_addr: SocketAddr,
-    ) -> Result<Response<Body>> {
-        let headers;
-        let mut req = req;
-        {
-            headers = Self::headers(&mut req, raw_route, base, client_addr)?;
-        }
+        let (parts, body) = req.into_parts();
+        let bytes = body.collect().await?.to_bytes().to_vec();
 
-        let func = instance
-            .exports(&mut store)
-            .instance("inbound-http")
-            .ok_or_else(|| anyhow!("no inbound-http instance found"))?
-            .typed_func::<(RequestParam,), (http_types::Response,)>("handle-request")?;
-
-        let (parts, bytes) = req.into_parts();
-        let bytes = hyper::body::to_bytes(bytes).await?.to_vec();
-
-        let method = if let Some(method) = Self::method(&parts.method) {
+        let method = if let Some(method) = convert_method(&parts.method) {
             method
         } else {
             return Ok(Response::builder()
                 .status(http::StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::empty())?);
+                .body(body::empty())?);
         };
-
-        let headers: Vec<(&str, &str)> = headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
 
         // Preparing to remove the params field. We are leaving it in place for now
         // to avoid breaking the ABI, but no longer pass or accept values in it.
         // https://github.com/fermyon/spin/issues/663
         let params = vec![];
 
-        let body = Some(&bytes[..]);
         let uri = match parts.uri.path_and_query() {
             Some(u) => u.to_string(),
             None => parts.uri.to_string(),
         };
 
-        let req = RequestParam {
+        let req = http_types::Request {
             method,
-            uri: &uri,
-            headers: &headers,
-            params: &params,
-            body,
+            uri,
+            headers,
+            params,
+            body: Some(bytes),
         };
 
         let (resp,) = func.call_async(&mut store, (req,)).await?;
@@ -108,117 +83,32 @@ impl SpinHttpExecutor {
             tracing::error!("malformed HTTP status code");
             return Ok(Response::builder()
                 .status(http::StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())?);
+                .body(body::empty())?);
         };
 
         let mut response = http::Response::builder().status(resp.status);
         if let Some(headers) = response.headers_mut() {
-            Self::append_headers(headers, resp.headers)?;
+            append_headers(headers, resp.headers)?;
         }
 
         let body = match resp.body {
-            Some(b) => Body::from(b),
-            None => Body::empty(),
+            Some(b) => body::full(b.into()),
+            None => body::empty(),
         };
 
         Ok(response.body(body)?)
     }
-
-    fn method(m: &http::Method) -> Option<Method> {
-        Some(match *m {
-            http::Method::GET => Method::Get,
-            http::Method::POST => Method::Post,
-            http::Method::PUT => Method::Put,
-            http::Method::DELETE => Method::Delete,
-            http::Method::PATCH => Method::Patch,
-            http::Method::HEAD => Method::Head,
-            http::Method::OPTIONS => Method::Options,
-            _ => return None,
-        })
-    }
-
-    fn headers(
-        req: &mut Request<Body>,
-        raw: &str,
-        base: &str,
-        client_addr: SocketAddr,
-    ) -> Result<Vec<(String, String)>> {
-        let mut res = Vec::new();
-        for (name, value) in req
-            .headers()
-            .iter()
-            .map(|(name, value)| (name.to_string(), std::str::from_utf8(value.as_bytes())))
-        {
-            let value = value?.to_string();
-            res.push((name, value));
-        }
-
-        let default_host = http::HeaderValue::from_str("localhost")?;
-        let host = std::str::from_utf8(
-            req.headers()
-                .get("host")
-                .unwrap_or(&default_host)
-                .as_bytes(),
-        )?;
-
-        // Set the environment information (path info, base path, etc) as headers.
-        // In the future, we might want to have this information in a context
-        // object as opposed to headers.
-        for (keys, val) in crate::compute_default_headers(req.uri(), raw, base, host, client_addr)?
-        {
-            res.push((Self::prepare_header_key(keys[0]), val));
-        }
-
-        Ok(res)
-    }
-
-    fn prepare_header_key(key: &str) -> String {
-        key.replace('_', "-").to_ascii_lowercase()
-    }
-
-    fn append_headers(res: &mut http::HeaderMap, src: Option<Vec<(String, String)>>) -> Result<()> {
-        if let Some(src) = src {
-            for (k, v) in src.iter() {
-                res.insert(
-                    http::header::HeaderName::from_str(k)?,
-                    http::header::HeaderValue::from_str(v)?,
-                );
-            }
-        };
-
-        Ok(())
-    }
 }
 
-fn contextualise_err(e: anyhow::Error) -> anyhow::Error {
-    if e.to_string()
-        .contains("failed to find function export `canonical_abi_free`")
-    {
-        e.context(
-            "component is not compatible with Spin executor - should this use the Wagi executor?",
-        )
-    } else {
-        e
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_spin_header_keys() {
-        assert_eq!(
-            SpinHttpExecutor::prepare_header_key("SPIN_FULL_URL"),
-            "spin-full-url".to_string()
-        );
-        assert_eq!(
-            SpinHttpExecutor::prepare_header_key("SPIN_PATH_INFO"),
-            "spin-path-info".to_string()
-        );
-        assert_eq!(
-            SpinHttpExecutor::prepare_header_key("SPIN_RAW_COMPONENT_ROUTE"),
-            "spin-raw-component-route".to_string()
-        );
-    }
+fn convert_method(m: &http::Method) -> Option<http_types::Method> {
+    Some(match *m {
+        http::Method::GET => http_types::Method::Get,
+        http::Method::POST => http_types::Method::Post,
+        http::Method::PUT => http_types::Method::Put,
+        http::Method::DELETE => http_types::Method::Delete,
+        http::Method::PATCH => http_types::Method::Patch,
+        http::Method::HEAD => http_types::Method::Head,
+        http::Method::OPTIONS => http_types::Method::Options,
+        _ => return None,
+    })
 }

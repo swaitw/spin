@@ -1,0 +1,4 @@
+trigger = { type = "http" }
+
+[[component]]
+id = "http-component"

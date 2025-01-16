@@ -4,13 +4,13 @@ description = "Redirects a HTTP route"
 trigger_type = "http"
 tags = ["redirect"]
 
-[new_application]
-supported = false
-
 [add_component]
+skip_files = ["spin.toml"]
+skip_parameters = ["project-description"]
 [add_component.snippets]
 component = "component.txt"
 
 [parameters]
+project-description = { type = "string",  prompt = "Description", default = "" }
 redirect-from = { type = "string", prompt = "Redirect from", pattern = "^/\\S*$" }
-redirect-to = { type = "string", prompt = "Redirect to", pattern = "^/\\S*$" }
+redirect-to = { type = "string", prompt = "Redirect to" }

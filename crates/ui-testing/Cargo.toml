@@ -1,0 +1,12 @@
+[package]
+name = "ui-testing"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+dirs = { workspace = true }
+libtest-mimic = "0.7"
+snapbox = "0.4"
+tokio = { workspace = true, features = ["macros", "rt"] }
